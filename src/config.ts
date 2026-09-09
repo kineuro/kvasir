@@ -3,6 +3,7 @@
 
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { type OAuthProvider, oauthProviders } from "./personal.js";
 
 export type BackendKind = "openai-completions" | "anthropic-messages";
 
@@ -62,6 +63,8 @@ export interface Config {
   /** The purposes apps registered (§8.3). */
   purposes: import("./policy.js").Purpose[];
   backends: BackendConfig[];
+  /** The OAuth providers a person may bring a subscription through (C5); the wave's two by default, an operator's rows replacing them by name. */
+  oauth: OAuthProvider[];
 }
 
 export function parse(text: string): Config {
@@ -99,6 +102,7 @@ export function parse(text: string): Config {
       gate: raw.admission?.gate ?? true,
     },
     sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
+    oauth: oauthProviders((raw as { oauth?: unknown }).oauth),
     purposes: purposes(raw.purposes ?? []),
     backends: raw.backends as BackendConfig[],
   };

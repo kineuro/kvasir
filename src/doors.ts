@@ -210,6 +210,7 @@ export async function piMessages(
       temperature: typeof o.temperature === "number" ? o.temperature : undefined,
       maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : undefined,
       signal: controller.signal,
+      subject: who.subject,
     })) {
       if (
         ttftMs === null &&
