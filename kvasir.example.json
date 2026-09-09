@@ -1,0 +1,26 @@
+{
+  "bind": "127.0.0.1:7100",
+  "origin": "http://127.0.0.1:7100",
+  "auth": { "mode": "off" },
+  "backends": [
+    {
+      "id": "card",
+      "kind": "openai-completions",
+      "baseUrl": "http://127.0.0.1:30000/v1",
+      "keyFile": "/etc/kvasir/card.key",
+      "locality": "local",
+      "concurrency": 8,
+      "models": [
+        {
+          "id": "qwen38-27b",
+          "name": "Qwen3.8 27B (card)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 32768,
+          "maxTokens": 8192,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  ]
+}
