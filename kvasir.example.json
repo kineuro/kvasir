@@ -50,6 +50,80 @@
           }
         }
       ]
+    },
+    {
+      "id": "minimax-openai",
+      "kind": "openai-completions",
+      "baseUrl": "https://api.minimax.io/v1",
+      "provider": "minimax",
+      "locality": "remote",
+      "concurrency": 4,
+      "models": [
+        {
+          "id": "MiniMax-M2",
+          "name": "MiniMax M2 (remote)",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 200000,
+          "maxTokens": 16384,
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.03,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "minimax-anthropic",
+      "kind": "anthropic-messages",
+      "baseUrl": "https://api.minimax.io/anthropic",
+      "provider": "minimax",
+      "locality": "remote",
+      "concurrency": 4,
+      "models": [
+        {
+          "id": "MiniMax-M2-anthropic",
+          "name": "MiniMax M2, Anthropic shape (remote)",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 200000,
+          "maxTokens": 16384,
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.03,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  ],
+  "sealKeyFile": "kvasir.seal",
+  "purposes": [
+    {
+      "id": "assistant.ask-help",
+      "app": "nils-assistant",
+      "content": "rows",
+      "kind": "foreground",
+      "description": "turn words into an ask document, or tune one step of it"
+    },
+    {
+      "id": "assistant.compaction",
+      "app": "nils-assistant",
+      "content": "rows",
+      "kind": "background"
+    },
+    {
+      "id": "assistant.title",
+      "app": "nils-assistant",
+      "content": "catalog",
+      "kind": "background"
     }
   ]
 }
