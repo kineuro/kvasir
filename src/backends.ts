@@ -94,7 +94,7 @@ export class Backend {
     try {
       const common = {
         apiKey: (await this.credential?.(options.subject)) ?? this.key ?? "none",
-        temperature: options.temperature,
+        temperature: options.temperature ?? this.config.defaults?.temperature,
         maxTokens: options.maxTokens,
         signal: options.signal,
         // the suite forces a call for the negative control (§8.6); a client never sets it
