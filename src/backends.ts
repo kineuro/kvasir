@@ -6,6 +6,7 @@
 import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as openaiStream } from "@earendil-works/pi-ai/api/openai-completions";
+import { Admission } from "./admission.js";
 import { type BackendConfig, keyOf, type ModelEntry } from "./config.js";
 
 export interface Health {
@@ -22,8 +23,9 @@ export class Backend {
   readonly config: BackendConfig;
   private readonly key: string | undefined;
   readonly health: Health;
+  readonly admission: Admission;
 
-  constructor(config: BackendConfig) {
+  constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000) {
     this.config = config;
     this.key = keyOf(config);
     this.health = {
@@ -33,6 +35,7 @@ export class Backend {
       running: 0,
       concurrency: config.concurrency,
     };
+    this.admission = new Admission(config.concurrency, queue, waitCapMs);
   }
 
   /** The pi model of one entry, as the backend serves it. */
@@ -112,8 +115,10 @@ export class Backend {
 
 export class Backends {
   readonly list: Backend[];
-  constructor(configs: BackendConfig[]) {
-    this.list = configs.map((c) => new Backend(c));
+  constructor(configs: BackendConfig[], admission?: { queue: number; waitCapSeconds: number }) {
+    this.list = configs.map(
+      (c) => new Backend(c, admission?.queue ?? 8, (admission?.waitCapSeconds ?? 60) * 1000),
+    );
   }
 
   /** The backend and entry that serve a model id, or nothing. */

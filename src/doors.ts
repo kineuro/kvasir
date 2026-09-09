@@ -4,7 +4,10 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AssistantMessageEvent, Context } from "@earendil-works/pi-ai";
+import { RefusedAdmission } from "./admission.js";
+import type { Principal } from "./auth.js";
 import type { Backends } from "./backends.js";
+import type { Ledger, Row } from "./ledger.js";
 
 export function json(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
@@ -91,11 +94,13 @@ export function toPiMessagesEvent(ev: AssistantMessageEvent): Record<string, unk
   }
 }
 
-/** `POST /v1/messages`: `{model, context, options}` in, the event stream out. */
+/** `POST /v1/messages`: `{model, context, options}` in, the event stream out, one ledger row. */
 export async function piMessages(
   req: IncomingMessage,
   res: ServerResponse,
   backends: Backends,
+  who: Principal,
+  ledger: Ledger,
 ): Promise<void> {
   let body: { model?: string; context?: Context; options?: Record<string, unknown> };
   try {
@@ -115,24 +120,122 @@ export async function piMessages(
     json(res, 400, { error: { code: "bad_request", message: "context: pi's context, with its messages" } });
     return;
   }
+  // a minted key with no purpose reaches only local backends (§8.4)
+  if (
+    who.kind === "key" &&
+    (who.key?.purposes.length ?? 0) === 0 &&
+    found.backend.config.locality !== "local"
+  ) {
+    const refusal = { layer: "policy" as const, fact: "a key with no purpose reaches only local backends" };
+    ledger.record(row(who, found, { outcome: "refused", refusal }));
+    json(res, 403, { error: { code: "refused", layer: refusal.layer, message: refusal.fact } });
+    return;
+  }
   const controller = new AbortController();
   req.on("close", () => controller.abort());
+  const started = Date.now();
+  // the queue (§8.7): the headers go out now; a heartbeat keeps the socket while waiting
   const send = sse(res);
+  let release: (() => void) | null = null;
+  try {
+    release = await found.backend.admission.acquire(() => res.write(": queued\n\n"), controller.signal);
+  } catch (e) {
+    const refusal = e instanceof RefusedAdmission ? e.refusal : { layer: "health" as const, fact: "no slot" };
+    send({
+      type: "error",
+      reason: "error",
+      usage: emptyUsage(),
+      errorMessage: `refused at the ${refusal.layer} layer: ${refusal.fact}`,
+    });
+    res.end();
+    ledger.record(row(who, found, { outcome: "refused", refusal, totalMs: Date.now() - started }));
+    return;
+  }
   const o = body.options ?? {};
+  let ttftMs: number | null = null;
+  let outcome: Row["outcome"] = "completed";
+  let usage: Partial<Row> | null = null;
   try {
     for await (const ev of found.backend.stream(found.entry, body.context, {
       temperature: typeof o.temperature === "number" ? o.temperature : undefined,
       maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : undefined,
       signal: controller.signal,
     })) {
+      if (
+        ttftMs === null &&
+        (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta")
+      ) {
+        ttftMs = Date.now() - started;
+      }
+      if (ev.type === "done") {
+        usage = counts(ev.message.usage);
+        if (ev.reason === "length") outcome = "capped";
+      }
+      if (ev.type === "error") {
+        usage = counts(ev.error.usage);
+        outcome = ev.reason === "aborted" ? "aborted" : "error";
+      }
       send(toPiMessagesEvent(ev));
     }
   } catch (e) {
     // a provider error body never leaves: a classified code and a fixed sentence (§8.7)
     send({ type: "error", reason: "error", usage: emptyUsage(), errorMessage: "the backend did not answer" });
     found.backend.health.lastError = e instanceof Error ? e.message : String(e);
+    outcome = controller.signal.aborted ? "aborted" : "error";
+  } finally {
+    release();
   }
   res.end();
+  const totalMs = Date.now() - started;
+  ledger.record(
+    row(who, found, {
+      ...(usage ?? {}),
+      outcome,
+      ttftMs,
+      totalMs,
+      gpuSeconds: found.backend.config.locality === "local" ? totalMs / 1000 : 0,
+    }),
+  );
+}
+
+function counts(
+  u:
+    | { input: number; output: number; cacheRead: number; cacheWrite: number; cost?: { total?: number } }
+    | undefined,
+): Partial<Row> {
+  if (!u) return {};
+  return {
+    input: u.input,
+    output: u.output,
+    cacheRead: u.cacheRead,
+    cacheWrite: u.cacheWrite,
+    money: u.cost?.total ?? 0,
+  };
+}
+
+function row(
+  who: Principal,
+  found: { backend: { config: { id: string } }; entry: { id: string } },
+  over: Partial<Row>,
+): Row {
+  return {
+    subject: who.subject,
+    purpose: null,
+    model: found.entry.id,
+    backend: found.backend.config.id,
+    grantId: null,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    gpuSeconds: 0,
+    money: 0,
+    ttftMs: null,
+    totalMs: null,
+    outcome: "completed",
+    ...over,
+  };
 }
 
 function emptyUsage() {
