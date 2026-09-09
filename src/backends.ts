@@ -22,6 +22,8 @@ export interface Health {
 export class Backend {
   readonly config: BackendConfig;
   private readonly key: string | undefined;
+  /** The credential store's answer for this backend's provider, at use, never kept (§8.4). */
+  credential: (() => string | null) | null = null;
   readonly health: Health;
   readonly admission: Admission;
 
@@ -68,7 +70,7 @@ export class Backend {
     this.health.running += 1;
     try {
       const common = {
-        apiKey: this.key ?? "none",
+        apiKey: this.credential?.() ?? this.key ?? "none",
         temperature: options.temperature,
         maxTokens: options.maxTokens,
         signal: options.signal,

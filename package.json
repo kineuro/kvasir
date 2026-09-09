@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.83.0",
+    "@noble/ciphers": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "jose": "^6.2.12"
   },
