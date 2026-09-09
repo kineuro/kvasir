@@ -30,6 +30,10 @@ export interface BackendConfig {
   models: ModelEntry[];
   /** A warm-up prompt sent at start; the backend is warming until its first token (§8.5). */
   warmup?: boolean;
+  /** The provider a remote backend's credential is stored under (§8.4); the key comes from the credential store, not this file. */
+  provider?: string;
+  /** The highest content class this backend may carry; every class when absent. */
+  classes?: import("./keys.js").ContentClass;
 }
 
 export interface Config {
@@ -42,6 +46,10 @@ export interface Config {
   pepperFile: string;
   /** Per backend (§8.7): the queue behind the admitted streams and the wait cap. */
   admission: { queue: number; waitCapSeconds: number };
+  /** The seal key of the stored credentials (§8.4): a file outside the database, made at first start. */
+  sealKeyFile: string;
+  /** The purposes apps registered (§8.3). */
+  purposes: import("./policy.js").Purpose[];
   backends: BackendConfig[];
 }
 
@@ -75,6 +83,8 @@ export function parse(text: string): Config {
     store: raw.store ?? "kvasir.sqlite",
     pepperFile: raw.pepperFile ?? "kvasir.pepper",
     admission: { queue: raw.admission?.queue ?? 8, waitCapSeconds: raw.admission?.waitCapSeconds ?? 60 },
+    sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
+    purposes: purposes(raw.purposes ?? []),
     backends: raw.backends as BackendConfig[],
   };
 }
@@ -99,4 +109,27 @@ export function pepper(path: string): Uint8Array {
     writeFileSync(path, bytes, { mode: 0o600 });
     return new Uint8Array(bytes);
   }
+}
+
+function purposes(list: unknown[]): import("./policy.js").Purpose[] {
+  const out: import("./policy.js").Purpose[] = [];
+  for (const raw of list) {
+    const p = raw as Partial<import("./policy.js").Purpose>;
+    if (!p.id || !/^[a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*$/u.test(p.id))
+      throw new Error(`kvasir.json: purposes: ${p.id} is not app.purpose`);
+    if (!p.app) throw new Error(`kvasir.json: purpose ${p.id}: app`);
+    if (!["catalog", "rows", "identifiers"].includes(p.content ?? ""))
+      throw new Error(`kvasir.json: purpose ${p.id}: content is catalog, rows or identifiers`);
+    if (!["foreground", "background"].includes(p.kind ?? ""))
+      throw new Error(`kvasir.json: purpose ${p.id}: kind is foreground or background`);
+    if (out.some((x) => x.id === p.id)) throw new Error(`kvasir.json: purpose ${p.id} is listed twice`);
+    out.push({
+      id: p.id,
+      app: p.app,
+      content: p.content as never,
+      kind: p.kind as never,
+      description: p.description,
+    });
+  }
+  return out;
 }

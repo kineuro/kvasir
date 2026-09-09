@@ -8,6 +8,7 @@ import { RefusedAdmission } from "./admission.js";
 import type { Principal } from "./auth.js";
 import type { Backends } from "./backends.js";
 import type { Ledger, Row } from "./ledger.js";
+import { type Grant, identifierShape, type Policy, Refused as PolicyRefused } from "./policy.js";
 
 export function json(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
@@ -101,6 +102,7 @@ export async function piMessages(
   backends: Backends,
   who: Principal,
   ledger: Ledger,
+  policy: Policy,
 ): Promise<void> {
   let body: { model?: string; context?: Context; options?: Record<string, unknown> };
   try {
@@ -109,7 +111,7 @@ export async function piMessages(
     json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : "not JSON" } });
     return;
   }
-  const found = typeof body.model === "string" ? backends.find(body.model) : undefined;
+  let found = typeof body.model === "string" ? backends.find(body.model) : undefined;
   if (!found) {
     json(res, 404, {
       error: { code: "no_such_model", message: `no model named ${body.model} in the catalog` },
@@ -120,16 +122,64 @@ export async function piMessages(
     json(res, 400, { error: { code: "bad_request", message: "context: pi's context, with its messages" } });
     return;
   }
-  // a minted key with no purpose reaches only local backends (§8.4)
-  if (
-    who.kind === "key" &&
-    (who.key?.purposes.length ?? 0) === 0 &&
-    found.backend.config.locality !== "local"
-  ) {
-    const refusal = { layer: "policy" as const, fact: "a key with no purpose reaches only local backends" };
-    ledger.record(row(who, found, { outcome: "refused", refusal }));
-    json(res, 403, { error: { code: "refused", layer: refusal.layer, message: refusal.fact } });
-    return;
+  // The purpose (§8.3): a grant already taken, or a registered purpose the
+  // caller names, or for a minted key one of its allowlist; without any, a
+  // local backend only. The text is read for an identifier shape, which
+  // bumps the class for this request and keeps it local whatever the
+  // table says.
+  let granted: Grant | null = null;
+  let purposeName: string | null = null;
+  const grantHeader = String(req.headers["x-kvasir-grant"] ?? "");
+  const purposeHeader = String(req.headers["x-kvasir-purpose"] ?? "");
+  const bumped = identifierShape(userText(body.context));
+  try {
+    if (grantHeader) {
+      granted = policy.take(grantHeader) ?? null;
+      if (!granted)
+        throw new PolicyRefused(403, [
+          { layer: "policy", fact: "the grant is unknown or expired", relaxation: "ask for a grant again" },
+        ]);
+      if (bumped && granted.locality === "remote") {
+        granted = policy.grant(granted.purpose, {}, { bumped, keyClass: who.key?.maxClass });
+      }
+    } else if (purposeHeader || (who.kind === "key" && (who.key?.purposes.length ?? 0) > 0)) {
+      purposeName = purposeHeader || (who.key?.purposes[0] ?? "");
+      if (who.kind === "key" && !who.key?.purposes.includes(purposeName)) {
+        throw new PolicyRefused(403, [
+          { layer: "policy", fact: `the key's purposes do not include ${purposeName}` },
+        ]);
+      }
+      granted = policy.grant(purposeName, {}, { pin: body.model, bumped, keyClass: who.key?.maxClass });
+    } else if (found.backend.config.locality !== "local") {
+      throw new PolicyRefused(403, [
+        {
+          layer: "policy",
+          fact: "a purpose is required to reach a remote backend; without one a call runs local only",
+          relaxation: "send x-kvasir-purpose, or a grant",
+        },
+      ]);
+    }
+  } catch (e) {
+    if (e instanceof PolicyRefused) {
+      const first = e.refusals[0];
+      ledger.record(
+        row(who, found, {
+          outcome: "refused",
+          refusal: { layer: first.layer, fact: first.fact },
+          purpose: purposeName,
+        }),
+      );
+      json(res, e.status, {
+        error: { code: "refused", layer: first.layer, message: first.fact, refusals: e.refusals },
+      });
+      return;
+    }
+    throw e;
+  }
+  // the grant decides the backend and the model; a caller that named another is moved
+  if (granted && (granted.model !== found.entry.id || granted.backend !== found.backend.config.id)) {
+    const to = backends.find(granted.model);
+    if (to) found = to;
   }
   const controller = new AbortController();
   req.on("close", () => controller.abort());
@@ -194,8 +244,21 @@ export async function piMessages(
       ttftMs,
       totalMs,
       gpuSeconds: found.backend.config.locality === "local" ? totalMs / 1000 : 0,
+      purpose: granted?.purpose ?? purposeName,
+      grantId: granted?.grant ?? null,
     }),
   );
+}
+
+/** The person's own words in a context: the last user message and the system prompt, for the identifier-shape rule. */
+function userText(context: Context): string {
+  const parts: string[] = [context.systemPrompt ?? ""];
+  for (const m of context.messages) {
+    if (m.role !== "user") continue;
+    if (typeof m.content === "string") parts.push(m.content);
+    else for (const c of m.content) if (c.type === "text") parts.push(c.text);
+  }
+  return parts.join("\n");
 }
 
 function counts(

@@ -245,7 +245,7 @@ describe("the door", () => {
         kind: "anthropic-messages",
         baseUrl: rt.url,
         key: "vendor-key",
-        locality: "remote",
+        locality: "local",
         concurrency: 4,
         warmup: false,
         models: [
