@@ -31,6 +31,8 @@ export interface Runtime {
 export interface Overhead {
   streams: number;
   rounds: number;
+  /** Each round's wall clock for the streams, by path. */
+  rounds_ms?: { round: number; how: "direct" | "via"; ms: number }[];
   prompt_tokens: number;
   direct: { p50: number; p95: number; n: number };
   via: { p50: number; p95: number; n: number };
@@ -93,6 +95,24 @@ function callsOf(m: AssistantMessage | null): { name: string; arguments: Record<
       ? [{ name: c.name, arguments: (c.arguments ?? {}) as Record<string, unknown> }]
       : [],
   );
+}
+
+/** Whether the fixture's expected value is carried by the actual one: every named key and every listed element, extra keys allowed. */
+export function matches(expected: unknown, actual: unknown): boolean {
+  if (Array.isArray(expected)) {
+    return (
+      Array.isArray(actual) &&
+      expected.length === actual.length &&
+      expected.every((e, i) => matches(e, actual[i]))
+    );
+  }
+  if (expected !== null && typeof expected === "object") {
+    if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
+    return Object.entries(expected as Record<string, unknown>).every(([k, v]) =>
+      matches(v, (actual as Record<string, unknown>)[k]),
+    );
+  }
+  return expected === actual;
 }
 
 /** A small validator over our own schemas: required present, no unknown key, top-level types right. */
@@ -176,9 +196,7 @@ export async function toolCalls(
       const bad = wellFormed(calls[0].arguments, byName.get(f.tool)?.parameters ?? {});
       if (bad) why = bad;
       else {
-        const missing = Object.entries(f.args).find(
-          ([k, v]) => JSON.stringify(calls[0].arguments[k]) !== JSON.stringify(v),
-        );
+        const missing = Object.entries(f.args).find(([k, v]) => !matches(v, calls[0].arguments[k]));
         if (missing)
           why = `${missing[0]} is ${JSON.stringify(calls[0].arguments[missing[0]])}, expected ${JSON.stringify(missing[1])}`;
         else ok = true;
@@ -204,7 +222,7 @@ export async function chatTemplate(backend: Backend, entry: ModelEntry): Promise
         systemPrompt: "You answer with one word and nothing else.",
         messages: [user("Answer with the single word: ready")],
       },
-      { temperature: 0, maxTokens: 16 },
+      { temperature: 0, maxTokens: 256 },
     ),
   );
   const text = textOf(out.message).trim();
@@ -241,6 +259,8 @@ const CLAUSE_TOOL: ToolFixture = {
  */
 export async function enforcedSchema(backend: Backend, entry: ModelEntry): Promise<Check> {
   const tools = piTools([CLAUSE_TOOL], true);
+  // the call is forced, so a model cannot dodge the control by answering in prose
+  const toolChoice = { type: "function", function: { name: CLAUSE_TOOL.name } };
   const positive = await collect(
     backend.stream(
       entry,
@@ -249,7 +269,7 @@ export async function enforcedSchema(backend: Backend, entry: ModelEntry): Promi
         messages: [user('Call where_clause with the clause ["=", "base", "T1w"].')],
         tools,
       },
-      { temperature: 0, maxTokens: 256 },
+      { temperature: 0, maxTokens: 1024, toolChoice },
     ),
   );
   const pos = callsOf(positive.message)[0];
@@ -263,28 +283,32 @@ export async function enforcedSchema(backend: Backend, entry: ModelEntry): Promi
         ],
         tools,
       },
-      { temperature: 0, maxTokens: 256 },
+      { temperature: 0, maxTokens: 1024, toolChoice },
     ),
   );
   const neg = callsOf(negative.message)[0];
   const negClause = Array.isArray(neg?.arguments.clause) ? (neg?.arguments.clause as unknown[]) : null;
+  const posClause = pos?.arguments.clause;
+  const positiveOk = !positive.error && Array.isArray(posClause) && posClause.length >= 2;
   let verdict: "enforced" | "refused" | "ignored" | "inconclusive";
-  if (negative.error) verdict = "refused";
+  if (!positiveOk) verdict = "inconclusive";
+  else if (negative.error) verdict = "refused";
   else if (negClause && negClause.length === 1) verdict = "ignored";
   else if (negClause && negClause.length >= 2) verdict = "enforced";
   else verdict = "inconclusive";
-  const posClause = pos?.arguments.clause;
-  const positiveOk = Array.isArray(posClause) && posClause.length >= 2;
-  const passed = (verdict === "enforced" || verdict === "refused") && (verdict === "refused" || positiveOk);
+  const passed = verdict === "enforced" || verdict === "refused";
   return {
     name: "enforced_schema",
     passed,
-    detail: `minItems 2 is ${verdict}; the positive call ${positiveOk ? "carried two or more operands" : "did not"}`,
+    detail: `minItems 2 is ${verdict}; the positive call ${positiveOk ? "carried two or more operands" : `did not (${positive.error ?? "no clause"})`}`,
     measured: {
       verdict,
       positive: pos?.arguments ?? null,
       negative: neg?.arguments ?? null,
       negative_error: negative.error,
+      positive_error: positive.error,
+      negative_text: textOf(negative.message).slice(0, 200),
+      negative_reason: negative.reason,
     },
   };
 }
@@ -366,7 +390,9 @@ export async function streamIntegrity(backend: Backend, entry: ModelEntry): Prom
       measured: {},
     };
   const thinking = first.message.content.find((c) => c.type === "thinking");
-  const signature = thinking && thinking.type === "thinking" ? (thinking.thinkingSignature ?? "") : "";
+  let signature = thinking && thinking.type === "thinking" ? (thinking.thinkingSignature ?? "") : "";
+  // pi's openai adapter marks which field the reasoning came from; that is a name, not a signature
+  if (["reasoning_content", "reasoning", "reasoning_text"].includes(signature)) signature = "";
   if (!signature)
     return {
       name: "stream_integrity",
@@ -490,11 +516,12 @@ export async function measureOverhead(
   opts: { streams?: number; rounds?: number; promptTokens?: number; log?: (line: string) => void } = {},
 ): Promise<Overhead> {
   const streams = opts.streams ?? 8;
-  const rounds = opts.rounds ?? 2;
+  const rounds = opts.rounds ?? 4;
   const promptTokens = opts.promptTokens ?? 4096;
   const log = opts.log ?? (() => undefined);
   const direct: number[] = [];
   const through: number[] = [];
+  const roundsMs: { round: number; how: "direct" | "via"; ms: number }[] = [];
   const one = async (context: Context, how: "direct" | "via", record = true) => {
     const events =
       how === "direct" ? backend.stream(entry, context, { temperature: 0, maxTokens: 32 }) : via(context, 32);
@@ -505,12 +532,16 @@ export async function measureOverhead(
   const contexts = Array.from({ length: streams }, (_, i) => ({
     messages: [user(`${filler(promptTokens, 100 + i)}\nAnswer with the single word: ready`)],
   }));
-  // the first request of every run is discarded (§8.10): one warm pass
-  await one(contexts[0], "direct", false);
+  // the first request of every run is discarded (§8.10), and every prefix
+  // is warmed once so the prompt cache favours neither path; the order of
+  // the two paths alternates by round for the same reason
+  await Promise.all(contexts.map((c) => one(c, "direct", false)));
   for (let r = 0; r < rounds; r++) {
-    for (const how of ["direct", "via"] as const) {
+    const order: ("direct" | "via")[] = r % 2 === 0 ? ["direct", "via"] : ["via", "direct"];
+    for (const how of order) {
       const t0 = Date.now();
       await Promise.all(contexts.map((c) => one(c, how)));
+      roundsMs.push({ round: r + 1, how, ms: Date.now() - t0 });
       log(`round ${r + 1} ${how}: ${streams} streams in ${Date.now() - t0} ms`);
     }
   }
@@ -521,6 +552,7 @@ export async function measureOverhead(
     streams,
     rounds,
     prompt_tokens: promptTokens,
+    rounds_ms: roundsMs,
     direct: d,
     via: v,
     overhead,

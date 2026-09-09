@@ -341,7 +341,7 @@ describe("the admission suite", () => {
     // the CLI path: the suite with the overhead through the process's own door
     const [rec] = await k.admit("card", "qwen", { overhead: true });
     expect(rec.overhead?.streams).toBe(8);
-    expect(rec.overhead?.via.n).toBe(16);
+    expect(rec.overhead?.via.n).toBe(32);
     expect(rec.overhead?.within).toBe(true);
   }, 60_000);
 
