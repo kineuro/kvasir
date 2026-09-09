@@ -22,8 +22,8 @@ export interface Health {
 export class Backend {
   readonly config: BackendConfig;
   private readonly key: string | undefined;
-  /** The credential store's answer for this backend's provider, at use, never kept (§8.4). */
-  credential: (() => string | null) | null = null;
+  /** The credential store's answer for this backend's provider and the person streaming, at use, never kept (§8.4). */
+  credential: ((subject?: string) => Promise<string | null> | string | null) | null = null;
   readonly health: Health;
   readonly admission: Admission;
   /** The models of this backend that passed the suite for the current runtime (§8.6); every model of a remote backend. */
@@ -80,13 +80,20 @@ export class Backend {
   async *stream(
     entry: ModelEntry,
     context: Context,
-    options: { temperature?: number; maxTokens?: number; signal?: AbortSignal; toolChoice?: unknown },
+    options: {
+      temperature?: number;
+      maxTokens?: number;
+      signal?: AbortSignal;
+      toolChoice?: unknown;
+      /** The person streaming, so a brought key or a grant of theirs is used before the organisation's (C5). */
+      subject?: string;
+    },
   ): AsyncGenerator<AssistantMessageEvent> {
     const model = this.model(entry);
     this.health.running += 1;
     try {
       const common = {
-        apiKey: this.credential?.() ?? this.key ?? "none",
+        apiKey: (await this.credential?.(options.subject)) ?? this.key ?? "none",
         temperature: options.temperature,
         maxTokens: options.maxTokens,
         signal: options.signal,

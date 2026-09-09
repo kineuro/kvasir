@@ -10,6 +10,7 @@ import { Credentials, sealKey } from "./credentials.js";
 import { chatCompletions, json, piMessages, readBody } from "./doors.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
+import { Personal } from "./personal.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
 import { measureOverhead, runSuite } from "./suite.js";
@@ -24,6 +25,7 @@ export interface Kvasir {
   ledger: Ledger;
   auth: Auth;
   credentials: Credentials;
+  personal: Personal;
   policy: Policy;
   admissions: Admissions;
   /** The suite over one model, recorded, and the admitted set refreshed (§8.6). */
@@ -43,11 +45,15 @@ export function build(config: Config): Kvasir {
   const keys = new Keys(store, pepper(config.pepperFile));
   const ledger = new Ledger(store);
   const auth = new Auth(config.auth, keys);
-  const credentials = new Credentials(store, sealKey(config.sealKeyFile));
+  const seal = sealKey(config.sealKeyFile);
+  const credentials = new Credentials(store, seal);
+  const personal = new Personal(store, seal, config.oauth, config.origin);
   for (const b of backends.list) {
     if (b.config.provider) {
       const provider = b.config.provider;
-      b.credential = () => credentials.open(provider);
+      // the person's own credential first (a brought key or a live grant), else the organisation's (§8.4)
+      b.credential = async (subject) =>
+        (subject ? await personal.open(subject, provider) : null) ?? credentials.open(provider);
     }
   }
   const policy = new Policy(store, config.purposes, backends);
@@ -97,6 +103,23 @@ export function build(config: Config): Kvasir {
       res.end(ledger.metrics());
       return;
     }
+    // the OAuth callback (C5) arrives from the provider through the person's browser with no bearer: the state is its identity
+    if (path === "/v1/personal/oauth/callback" && req.method === "GET") {
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      if (!code || !state)
+        return json(res, 400, { error: { code: "bad_request", message: "code and state" } });
+      try {
+        const done = await personal.callback(code, state, null);
+        res.writeHead(303, {
+          location: `${done.return_to}${done.return_to.includes("#") ? "" : "#settings"}`,
+        });
+        res.end();
+      } catch (e) {
+        json(res, 400, { error: { code: "oauth", message: e instanceof Error ? e.message : String(e) } });
+      }
+      return;
+    }
     let who: Principal;
     try {
       who = await auth.principal(req);
@@ -116,6 +139,7 @@ export function build(config: Config): Kvasir {
         keys,
         ledger,
         credentials,
+        personal,
         policy,
         admissions,
         admit,
@@ -135,6 +159,7 @@ export function build(config: Config): Kvasir {
     ledger,
     auth,
     credentials,
+    personal,
     policy,
     admissions,
     admit,
@@ -216,12 +241,13 @@ async function route(
     keys: Keys;
     ledger: Ledger;
     credentials: Credentials;
+    personal: Personal;
     policy: Policy;
     admissions: Admissions;
     admit: Kvasir["admit"];
   },
 ): Promise<void> {
-  const { config, backends, keys, ledger, credentials, policy, admissions, admit } = k;
+  const { config, backends, keys, ledger, credentials, personal, policy, admissions, admit } = k;
   if (path === "/v1/config" && req.method === "GET") {
     json(res, 200, { ...backends.catalog(config.origin), kvasir: { version: VERSION } });
   } else if (path === "/v1/models" && req.method === "GET") {
@@ -331,6 +357,52 @@ async function route(
       return json(res, 400, { error: { code: "bad_request", message: "secret: the provider's key" } });
     credentials.put(provider, body.secret);
     json(res, 200, { provider, stored: true, shown: "never" });
+  } else if (path === "/v1/personal" && req.method === "GET") {
+    // C5: what this person holds per provider, and whether a personal source is offered or absent by policy
+    json(res, 200, {
+      subject: who.subject,
+      redirect: personal.redirect(),
+      providers: personal.status(who.subject),
+    });
+  } else if (path.startsWith("/v1/personal/keys/") && (req.method === "PUT" || req.method === "DELETE")) {
+    if (who.kind !== "person")
+      return json(res, 403, {
+        error: {
+          code: "no_role",
+          message: "a brought key is a person's; a machine or a minted key holds none",
+        },
+      });
+    const provider = decodeURIComponent(path.slice("/v1/personal/keys/".length));
+    if (req.method === "DELETE") {
+      res.writeHead(personal.deleteKey(who.subject, provider) ? 204 : 404);
+      res.end();
+      return;
+    }
+    const body = JSON.parse(await readBody(req));
+    if (typeof body.secret !== "string" || body.secret.length < 8)
+      return json(res, 400, { error: { code: "bad_request", message: "secret: the provider's key" } });
+    personal.putKey(who.subject, provider, body.secret);
+    json(res, 200, { provider, stored: true, shown: "never" });
+  } else if (path.startsWith("/v1/personal/oauth/") && path.endsWith("/start") && req.method === "POST") {
+    if (who.kind !== "person")
+      return json(res, 403, { error: { code: "no_role", message: "an OAuth grant is a person's" } });
+    const provider = decodeURIComponent(path.slice("/v1/personal/oauth/".length, -"/start".length));
+    const body = JSON.parse(await readBody(req));
+    try {
+      json(
+        res,
+        200,
+        personal.start(who.subject, provider, String(body.session ?? ""), String(body.return_to ?? "")),
+      );
+    } catch (e) {
+      json(res, 400, { error: { code: "oauth", message: e instanceof Error ? e.message : String(e) } });
+    }
+  } else if (path.startsWith("/v1/personal/oauth/") && req.method === "DELETE") {
+    if (who.kind !== "person")
+      return json(res, 403, { error: { code: "no_role", message: "an OAuth grant is a person's" } });
+    const provider = decodeURIComponent(path.slice("/v1/personal/oauth/".length));
+    res.writeHead(personal.revoke(who.subject, provider) ? 204 : 404);
+    res.end();
   } else if (path === "/v1/admission" && req.method === "GET") {
     json(res, 200, {
       records: admissions.list(Math.min(500, Number(url.searchParams.get("limit") ?? 100) || 100)),
