@@ -44,9 +44,21 @@ export class Backend {
     this.admission = new Admission(config.concurrency, queue, waitCapMs);
   }
 
+  /** The compatibility flags of this backend: the operator's, over the local runtime defaults. */
+  compat(): Record<string, unknown> | undefined {
+    const local =
+      this.config.kind === "openai-completions" && this.config.locality === "local"
+        ? { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" }
+        : {};
+    const merged = { ...local, ...(this.config.compat ?? {}) };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
   /** The pi model of one entry, as the backend serves it. */
   model(entry: ModelEntry): Model<"openai-completions" | "anthropic-messages"> {
+    const compat = this.compat();
     return {
+      ...(compat ? { compat } : {}),
       id: entry.upstream ?? entry.id,
       name: entry.name,
       api: this.config.kind,
@@ -68,7 +80,7 @@ export class Backend {
   async *stream(
     entry: ModelEntry,
     context: Context,
-    options: { temperature?: number; maxTokens?: number; signal?: AbortSignal },
+    options: { temperature?: number; maxTokens?: number; signal?: AbortSignal; toolChoice?: unknown },
   ): AsyncGenerator<AssistantMessageEvent> {
     const model = this.model(entry);
     this.health.running += 1;
@@ -78,6 +90,8 @@ export class Backend {
         temperature: options.temperature,
         maxTokens: options.maxTokens,
         signal: options.signal,
+        // the suite forces a call for the negative control (§8.6); a client never sets it
+        ...(options.toolChoice !== undefined ? { toolChoice: options.toolChoice as never } : {}),
       };
       // the adapters are a fixed list in code (§8.1): no URL a caller names
       const events =

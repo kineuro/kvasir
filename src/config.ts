@@ -38,6 +38,13 @@ export interface BackendConfig {
   classes?: import("./keys.js").ContentClass;
   /** The runtime as the operator records it, when the runtime does not say (§8.6). */
   runtime?: { name: string; version: string; build: string };
+  /**
+   * pi-ai's compatibility flags for this backend's API, set here by the
+   * operator who knows the runtime; a local OpenAI-shaped runtime (SGLang,
+   * vLLM) gets `system` rather than `developer`, no `store`, and
+   * `max_tokens` unless told otherwise. A client never sends any.
+   */
+  compat?: Record<string, unknown>;
 }
 
 export interface Config {

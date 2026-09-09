@@ -335,7 +335,7 @@ export const FIXTURES: CallFixture[] = [
   {
     prompt: "Apply move 4 with no arguments to the set scope of document 7, epoch 2, token abc123.",
     tool: "nils_apply",
-    args: { document_id: 7, epoch: 2, token: "abc123", set: "scope", moves: [{ move_id: 4, args: {} }] },
+    args: { document_id: 7, epoch: 2, token: "abc123", set: "scope", moves: [{ move_id: 4 }] },
   },
   {
     prompt: "Diagnose document 9 and include the keys.",
