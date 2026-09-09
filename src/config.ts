@@ -37,6 +37,8 @@ export interface BackendConfig {
   provider?: string;
   /** The highest content class this backend may carry; every class when absent. */
   classes?: import("./keys.js").ContentClass;
+  /** Defaults a stream takes when the caller sets none: a small local model wants a low temperature for tool use (Wave 4c, the local-model rule). */
+  defaults?: { temperature?: number };
   /** The runtime as the operator records it, when the runtime does not say (§8.6). */
   runtime?: { name: string; version: string; build: string };
   /**
