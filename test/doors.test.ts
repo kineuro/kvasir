@@ -4,7 +4,10 @@
 // byte for byte, the first token after a start is reported as warming
 // until it arrives, and the OpenAI-shaped door answers a script.
 
+import { mkdtempSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import { stream as piStream } from "@earendil-works/pi-ai/api/pi-messages";
 import { afterAll, describe, expect, it } from "vitest";
@@ -126,11 +129,14 @@ afterAll(async () => {
 });
 
 async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> {
+  const dir = mkdtempSync(join(tmpdir(), "kvasir-"));
   const config = parse(
     JSON.stringify({
       bind: "127.0.0.1:0",
       origin: "http://kvasir.test",
-      auth: { mode: "token", tokens: { "a-kvasir-token": "anna" } },
+      auth: { mode: "token", tokens: { "a-kvasir-token": "anna@lab:admin" } },
+      store: join(dir, "kvasir.sqlite"),
+      pepperFile: join(dir, "kvasir.pepper"),
       backends,
     }),
   );

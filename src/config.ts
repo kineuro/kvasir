@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The configuration: the door, the backends and their models (Wave 4c §8.5).
 
-import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 
 export type BackendKind = "openai-completions" | "anthropic-messages";
 
@@ -34,7 +35,13 @@ export interface BackendConfig {
 export interface Config {
   bind: string;
   origin: string;
-  auth: { mode: "off" | "token"; tokens?: Record<string, string> };
+  auth: import("./auth.js").AuthConfig;
+  /** The one database. */
+  store: string;
+  /** The pepper of the minted keys' hashes: a file of at least sixteen bytes, made at first start. */
+  pepperFile: string;
+  /** Per backend (§8.7): the queue behind the admitted streams and the wait cap. */
+  admission: { queue: number; waitCapSeconds: number };
   backends: BackendConfig[];
 }
 
@@ -65,6 +72,9 @@ export function parse(text: string): Config {
     bind: raw.bind,
     origin: raw.origin.replace(/\/+$/u, ""),
     auth: raw.auth ?? { mode: "off" },
+    store: raw.store ?? "kvasir.sqlite",
+    pepperFile: raw.pepperFile ?? "kvasir.pepper",
+    admission: { queue: raw.admission?.queue ?? 8, waitCapSeconds: raw.admission?.waitCapSeconds ?? 60 },
     backends: raw.backends as BackendConfig[],
   };
 }
@@ -77,4 +87,16 @@ export function read(path: string): Config {
 export function keyOf(b: BackendConfig): string | undefined {
   if (b.keyFile) return readFileSync(b.keyFile, "utf8").trim();
   return b.key;
+}
+
+/** The pepper from its file, or a new one written there with mode 600. */
+export function pepper(path: string): Uint8Array {
+  try {
+    return new Uint8Array(readFileSync(path));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    const bytes = randomBytes(32);
+    writeFileSync(path, bytes, { mode: 0o600 });
+    return new Uint8Array(bytes);
+  }
 }

@@ -5,8 +5,12 @@
   "description": "The model gateway of NILS: one door for every model, pi-messages in and out, the catalog, the grants and the ledger",
   "license": "AGPL-3.0-only",
   "type": "module",
-  "engines": { "node": ">=22" },
-  "bin": { "kvasir": "dist/main.js" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "kvasir": "dist/main.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
@@ -14,7 +18,9 @@
     "check": "tsc -p tsconfig.json --noEmit && biome check ."
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.83.0"
+    "@earendil-works/pi-ai": "0.83.0",
+    "@noble/hashes": "^2.4.0",
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.1.0",

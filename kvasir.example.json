@@ -1,7 +1,29 @@
 {
   "bind": "127.0.0.1:7100",
   "origin": "http://127.0.0.1:7100",
-  "auth": { "mode": "off" },
+  "auth": {
+    "mode": "oidc",
+    "trust": [
+      {
+        "issuer": "https://auth.example.org/application/o/nils/",
+        "audience": "the-client-id",
+        "jwks": "https://auth.example.org/application/o/nils/jwks/"
+      }
+    ],
+    "groupsClaim": "roles",
+    "roles": {
+      "reader": "reader",
+      "reviewer": "reviewer",
+      "operator": "operator",
+      "admin": "admin"
+    }
+  },
+  "store": "kvasir.sqlite",
+  "pepperFile": "kvasir.pepper",
+  "admission": {
+    "queue": 8,
+    "waitCapSeconds": 60
+  },
   "backends": [
     {
       "id": "card",
@@ -15,10 +37,17 @@
           "id": "qwen38-27b",
           "name": "Qwen3.8 27B (card)",
           "reasoning": true,
-          "input": ["text"],
+          "input": [
+            "text"
+          ],
           "contextWindow": 32768,
           "maxTokens": 8192,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
         }
       ]
     }

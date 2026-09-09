@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NILS trust list test vectors",
+  "description": "Wave 4c section 5.3: what an implementation of the trust list must admit and refuse. Each case names the key that signs it (RS256, the kid in the header), the claims, and the outcome. exp and iat are set at run time: a case with expired true is minted in the past. Every implementation (the engine, Kvasir) runs these.",
+  "trust": [
+    {
+      "issuer": "https://id.example.org/application/o/nils/",
+      "audience": "nils",
+      "jwks": "jwks.json"
+    },
+    {
+      "issuer": "https://other.example.org/",
+      "audience": "desk",
+      "jwks": "jwks-2.json"
+    }
+  ],
+  "keys": {
+    "test-2026": "signing-key.pem",
+    "test-2027": "signing-key-2.pem"
+  },
+  "groups_claim": "groups",
+  "roles": {
+    "students": "reader",
+    "neuro-ops": "operator"
+  },
+  "cases": [
+    {
+      "name": "the first issuer admits its own token",
+      "key": "test-2026",
+      "claims": {
+        "iss": "https://id.example.org/application/o/nils/",
+        "aud": "nils",
+        "sub": "anna",
+        "groups": ["students"],
+        "preferred_username": "Anna",
+        "email": "anna@example.org"
+      },
+      "expect": {
+        "admitted": true,
+        "principal": "anna@id.example.org",
+        "roles": ["reader"],
+        "display": "Anna",
+        "email": "anna@example.org",
+        "actor": {
+          "kind": "absent"
+        }
+      }
+    },
+    {
+      "name": "the second issuer admits its own token with its own audience",
+      "key": "test-2027",
+      "claims": {
+        "iss": "https://other.example.org/",
+        "aud": "desk",
+        "sub": "bo",
+        "groups": ["neuro-ops"]
+      },
+      "expect": {
+        "admitted": true,
+        "principal": "bo@other.example.org",
+        "roles": ["reader", "reviewer", "operator"]
+      }
+    },
+    {
+      "name": "a key the issuer has not published is refused after a refetch",
+      "key": "test-2027",
+      "claims": {
+        "iss": "https://id.example.org/application/o/nils/",
+        "aud": "nils",
+        "sub": "anna",
+        "groups": ["students"]
+      },
+      "expect": {
+        "admitted": false,
+        "status": 401
+      }
+    },
+    {
+      "name": "an audience of another entry is refused",
+      "key": "test-2026",
+      "claims": {
+        "iss": "https://id.example.org/application/o/nils/",
+        "aud": "desk",
+        "sub": "anna",
+        "groups": ["students"]
+      },
+      "expect": {
+        "admitted": false,
+        "status": 401
+      }
+    },
+    {
+      "name": "an issuer the list does not name is refused",
+      "key": "test-2026",
+      "claims": {
+        "iss": "https://nobody.example.org/",
+        "aud": "nils",
+        "sub": "anna",
+        "groups": ["students"]
+      },
+      "expect": {
+        "admitted": false,
+        "status": 401
+      }
+    },
+    {
+      "name": "an expired token is refused",
+      "key": "test-2026",
+      "expired": true,
+      "claims": {
+        "iss": "https://id.example.org/application/o/nils/",
+        "aud": "nils",
+        "sub": "anna",
+        "groups": ["students"]
+      },
+      "expect": {
+        "admitted": false,
+        "status": 401
+      }
+    },
+    {
+      "name": "a group the role flags do not map holds no role and is refused, since an installer binds roles before a caller reads",
+      "key": "test-2026",
+      "claims": {
+        "iss": "https://id.example.org/application/o/nils/",
+        "aud": "nils",
+        "sub": "cy",
+        "groups": ["visitors"]
+      },
+      "expect": {
+        "admitted": false,
+        "status": 403
+      }
+    },
+    {
+      "name": "an act claim is the actor",
+      "key": "test-2026",
+      "claims": {
+        "iss": "https://id.example.org/application/o/nils/",
+        "aud": "nils",
+        "sub": "anna",
+        "groups": ["students"],
+        "act": {
+          "sub": "ask-help"
+        }
+      },
+      "expect": {
+        "admitted": true,
+        "actor": {
+          "kind": "agent",
+          "name": "ask-help"
+        }
+      }
+    }
+  ]
+}
