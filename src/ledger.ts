@@ -103,7 +103,9 @@ export class Ledger {
       );
     }
     lines.push("# TYPE kvasir_ttft_seconds histogram");
-    TTFT_BUCKETS.forEach((b, i) => lines.push(`kvasir_ttft_seconds_bucket{le="${b}"} ${this.ttft[i]}`));
+    for (const [i, b] of TTFT_BUCKETS.entries()) {
+      lines.push(`kvasir_ttft_seconds_bucket{le="${b}"} ${this.ttft[i]}`);
+    }
     lines.push(`kvasir_ttft_seconds_bucket{le="+Inf"} ${this.ttft[TTFT_BUCKETS.length]}`);
     lines.push(`kvasir_ttft_seconds_sum ${this.ttftSum}`);
     lines.push(`kvasir_ttft_seconds_count ${this.ttftCount}`);
