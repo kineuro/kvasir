@@ -1,0 +1,52 @@
+name: cla
+# Asks for the contributor license agreement (CLA.md) on every pull request, since
+# everything here is AGPL, and records signatures in the cla-signatures branch.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+       (github.event.comment.body == 'recheck' ||
+        github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: which parts the pull request touches
+        id: parts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" --paginate --jq '.[].filename')
+          if [ -z "$files" ] || echo "$files" | grep -qvE '^(contracts|sdk)/'; then
+            echo "engine=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "engine=false" >> "$GITHUB_OUTPUT"
+            echo "only contracts/ or sdk/: the DCO applies, no CLA needed"
+          fi
+      - uses: contributor-assistant/github-action@v2.6.1
+        if: steps.parts.outputs.engine == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla-v1.json
+          path-to-document: https://github.com/kineuro/kvasir/blob/main/CLA.md
+          branch: cla-signatures
+          allowlist: nima-ch,dependabot[bot],github-actions[bot]
+          custom-notsigned-prcomment: >-
+            Thank you for the pull request. Contributions to Kvasir need the
+            [NILS Contributor License Agreement](https://github.com/kineuro/kvasir/blob/main/CLA.md),
+            signed once. Please read it and post the sentence below as a comment.
+          custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
+          custom-allsigned-prcomment: All contributors have signed the CLA.

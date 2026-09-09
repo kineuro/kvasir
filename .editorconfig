@@ -1,0 +1,24 @@
+# Editor settings, checked in CI by scripts/check-hygiene.sh.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{rs,py}]
+indent_size = 4
+
+[{*.go,Makefile,*.mk}]
+indent_style = tab
+
+[*.md]
+trim_trailing_whitespace = false
+
+[{LICENSE,*/LICENSE}]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = false

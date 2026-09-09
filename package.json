@@ -1,0 +1,25 @@
+{
+  "name": "kvasir",
+  "version": "1.0.0-alpha.0",
+  "private": true,
+  "description": "The model gateway of NILS: one door for every model, pi-messages in and out, the catalog, the grants and the ledger",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "kvasir": "dist/main.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json --noEmit && biome check ."
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.83.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.1.0",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

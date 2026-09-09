@@ -1,0 +1,27 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  kvasir:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: SPDX headers on every source file
+        run: |
+          bad=0
+          for f in $(git ls-files 'src/*.ts' 'test/*.ts'); do
+            head -2 "$f" | grep -q 'SPDX-License-Identifier: AGPL-3.0-only' || { echo "no SPDX header: $f"; bad=1; }
+          done
+          exit $bad
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
