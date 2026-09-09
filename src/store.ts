@@ -39,6 +39,23 @@ export const SCHEMA = [
      refusal_fact TEXT
    )`,
   "CREATE INDEX IF NOT EXISTS ledger_subject ON ledger (subject, at)",
+  // The admission records (§8.6): suite results per model, runtime and
+  // build, kept until the runtime changes.
+  `CREATE TABLE IF NOT EXISTS admission (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     backend TEXT NOT NULL,
+     model TEXT NOT NULL,
+     runtime TEXT NOT NULL,
+     runtime_version TEXT NOT NULL,
+     runtime_build TEXT NOT NULL,
+     at INTEGER NOT NULL,
+     passed INTEGER NOT NULL,
+     overflow TEXT NOT NULL,
+     checks TEXT NOT NULL,
+     overhead TEXT,
+     kvasir TEXT NOT NULL
+   )`,
+  "CREATE INDEX IF NOT EXISTS admission_model ON admission (backend, model, at)",
 ];
 
 export class Store {

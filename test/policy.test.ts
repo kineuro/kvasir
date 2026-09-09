@@ -61,6 +61,7 @@ async function kvasir(localUrl: string, remoteUrl: string): Promise<{ k: Kvasir;
       },
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
+      admission: { queue: 8, waitCapSeconds: 60, gate: false },
       sealKeyFile: join(dir, "kvasir.seal"),
       purposes: [
         { id: "assistant.ask-help", app: "nils-assistant", content: "rows", kind: "foreground" },

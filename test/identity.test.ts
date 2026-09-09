@@ -74,7 +74,7 @@ async function kvasir(
       auth,
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
-      admission: { queue: 8, waitCapSeconds: 60 },
+      admission: { queue: 8, waitCapSeconds: 60, gate: false },
       backends: [
         {
           id: "card",

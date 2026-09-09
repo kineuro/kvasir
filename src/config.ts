@@ -8,6 +8,8 @@ export type BackendKind = "openai-completions" | "anthropic-messages";
 
 export interface ModelEntry {
   id: string;
+  /** The name the provider knows the model by, when it differs from the catalog id (two shapes of one provider). */
+  upstream?: string;
   name: string;
   reasoning: boolean;
   input: ("text" | "image")[];
@@ -34,6 +36,8 @@ export interface BackendConfig {
   provider?: string;
   /** The highest content class this backend may carry; every class when absent. */
   classes?: import("./keys.js").ContentClass;
+  /** The runtime as the operator records it, when the runtime does not say (§8.6). */
+  runtime?: { name: string; version: string; build: string };
 }
 
 export interface Config {
@@ -44,8 +48,8 @@ export interface Config {
   store: string;
   /** The pepper of the minted keys' hashes: a file of at least sixteen bytes, made at first start. */
   pepperFile: string;
-  /** Per backend (§8.7): the queue behind the admitted streams and the wait cap. */
-  admission: { queue: number; waitCapSeconds: number };
+  /** Per backend (§8.7): the queue behind the admitted streams and the wait cap; and the gate of §8.6, a local model listed only once admitted. */
+  admission: { queue: number; waitCapSeconds: number; gate: boolean };
   /** The seal key of the stored credentials (§8.4): a file outside the database, made at first start. */
   sealKeyFile: string;
   /** The purposes apps registered (§8.3). */
@@ -82,7 +86,11 @@ export function parse(text: string): Config {
     auth: raw.auth ?? { mode: "off" },
     store: raw.store ?? "kvasir.sqlite",
     pepperFile: raw.pepperFile ?? "kvasir.pepper",
-    admission: { queue: raw.admission?.queue ?? 8, waitCapSeconds: raw.admission?.waitCapSeconds ?? 60 },
+    admission: {
+      queue: raw.admission?.queue ?? 8,
+      waitCapSeconds: raw.admission?.waitCapSeconds ?? 60,
+      gate: raw.admission?.gate ?? true,
+    },
     sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
     purposes: purposes(raw.purposes ?? []),
     backends: raw.backends as BackendConfig[],
