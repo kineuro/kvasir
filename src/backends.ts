@@ -26,12 +26,16 @@ export class Backend {
   credential: (() => string | null) | null = null;
   readonly health: Health;
   readonly admission: Admission;
+  /** The models of this backend that passed the suite for the current runtime (§8.6); every model of a remote backend. */
+  readonly admitted = new Set<string>();
 
   constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000) {
     this.config = config;
     this.key = keyOf(config);
+    // the warm-up rule (§8.5) is a local runtime's; a remote provider is not warmed by us
+    const warming = config.locality === "local";
     this.health = {
-      warming: true,
+      warming,
       firstTokenAt: null,
       lastError: null,
       running: 0,
@@ -43,7 +47,7 @@ export class Backend {
   /** The pi model of one entry, as the backend serves it. */
   model(entry: ModelEntry): Model<"openai-completions" | "anthropic-messages"> {
     return {
-      id: entry.id,
+      id: entry.upstream ?? entry.id,
       name: entry.name,
       api: this.config.kind,
       provider: this.config.id as Model<"openai-completions">["provider"],
@@ -117,10 +121,21 @@ export class Backend {
 
 export class Backends {
   readonly list: Backend[];
-  constructor(configs: BackendConfig[], admission?: { queue: number; waitCapSeconds: number }) {
+  /** §8.6: a local model is not in the catalog until it has passed the suite. */
+  readonly gate: boolean;
+  constructor(
+    configs: BackendConfig[],
+    admission?: { queue: number; waitCapSeconds: number; gate?: boolean },
+  ) {
     this.list = configs.map(
       (c) => new Backend(c, admission?.queue ?? 8, (admission?.waitCapSeconds ?? 60) * 1000),
     );
+    this.gate = admission?.gate ?? true;
+  }
+
+  /** Whether a model is listed: a remote one always, a local one once admitted, unless the gate is off. */
+  listed(backend: Backend, entry: ModelEntry): boolean {
+    return !this.gate || backend.config.locality === "remote" || backend.admitted.has(entry.id);
   }
 
   /** The backend and entry that serve a model id, or nothing. */
@@ -137,17 +152,20 @@ export class Backends {
     return {
       baseUrl: `${origin}/v1`,
       models: this.list.flatMap((b) =>
-        b.config.models.map((m) => ({
-          id: m.id,
-          name: m.name,
-          reasoning: m.reasoning,
-          input: m.input,
-          cost: m.cost,
-          contextWindow: m.contextWindow,
-          maxTokens: m.maxTokens,
-          backend: b.config.id,
-          locality: b.config.locality,
-        })),
+        b.config.models
+          .filter((m) => this.listed(b, m))
+          .map((m) => ({
+            id: m.id,
+            name: m.name,
+            reasoning: m.reasoning,
+            input: m.input,
+            cost: m.cost,
+            contextWindow: m.contextWindow,
+            maxTokens: m.maxTokens,
+            backend: b.config.id,
+            locality: b.config.locality,
+            admitted: b.config.locality === "remote" ? null : b.admitted.has(m.id),
+          })),
       ),
       backends: this.list.map((b) => ({
         id: b.config.id,

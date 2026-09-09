@@ -137,6 +137,7 @@ async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> 
       auth: { mode: "token", tokens: { "a-kvasir-token": "anna@lab:admin" } },
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
+      admission: { queue: 8, waitCapSeconds: 60, gate: false },
       backends,
     }),
   );

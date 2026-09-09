@@ -309,10 +309,11 @@ export class Policy {
       });
     }
     if (refusals.length > 0) throw new Refused(409, refusals);
-    if (chosen.health.warming === false)
-      because.push(
-        `${chosen.config.id} is warm since ${new Date(chosen.health.firstTokenAt ?? 0).toISOString()}`,
-      );
+    if (chosen.health.firstTokenAt) {
+      because.push(`${chosen.config.id} is warm since ${new Date(chosen.health.firstTokenAt).toISOString()}`);
+    } else if (chosen.config.locality === "remote") {
+      because.push(`${chosen.config.id} is a remote provider, not warmed by this gateway`);
+    }
     const g: Grant = {
       grant: `g_${randomBytes(9).toString("base64url")}`,
       purpose: purposeId,

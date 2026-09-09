@@ -2,6 +2,7 @@
 // The one process: the router, identity, the keys, the ledger, the metrics.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { Admissions } from "./admission-records.js";
 import { Auth, holds, type Principal, Refused } from "./auth.js";
 import { Backends } from "./backends.js";
 import { type Config, pepper } from "./config.js";
@@ -11,6 +12,7 @@ import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
+import { measureOverhead, runSuite } from "./suite.js";
 
 export const VERSION = "1.0.0-alpha.0";
 
@@ -23,6 +25,13 @@ export interface Kvasir {
   auth: Auth;
   credentials: Credentials;
   policy: Policy;
+  admissions: Admissions;
+  /** The suite over one model, recorded, and the admitted set refreshed (§8.6). */
+  admit: (
+    backendId: string,
+    modelId?: string,
+    opts?: { overhead?: boolean; log?: (line: string) => void },
+  ) => Promise<import("./suite.js").AdmissionRecord[]>;
   server: Server;
   address: () => string;
   close: () => Promise<void>;
@@ -42,6 +51,36 @@ export function build(config: Config): Kvasir {
     }
   }
   const policy = new Policy(store, config.purposes, backends);
+  const admissions = new Admissions(store);
+  const admit: Kvasir["admit"] = async (backendId, modelId, opts = {}) => {
+    const backend = backends.list.find((b) => b.config.id === backendId);
+    if (!backend) throw new Error(`no backend ${backendId}`);
+    const entries = backend.config.models.filter((m) => !modelId || m.id === modelId);
+    if (entries.length === 0) throw new Error(`no model ${modelId} on ${backendId}`);
+    const out = [];
+    for (const entry of entries) {
+      const rec = await runSuite(backend, entry, { log: opts.log });
+      rec.kvasir = VERSION;
+      if (opts.overhead) {
+        // through this process's own door, the same client, the same prompt
+        const origin = k.address();
+        rec.overhead = await measureOverhead(
+          backend,
+          entry,
+          (context, maxTokens) => viaDoor(origin, entry.id, context, maxTokens, config),
+          { log: opts.log },
+        );
+        opts.log?.(
+          `overhead p50 ${rec.overhead.overhead.p50} ms, p95 ${rec.overhead.overhead.p95} ms (${rec.overhead.within ? "within" : "OVER"} the thresholds)`,
+        );
+      }
+      const stored = admissions.put(rec);
+      if (rec.passed) backend.admitted.add(entry.id);
+      else backend.admitted.delete(entry.id);
+      out.push(stored);
+    }
+    return out;
+  };
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://kvasir");
     const path = url.pathname.replace(/\/+$/u, "") || "/";
@@ -71,7 +110,16 @@ export function build(config: Config): Kvasir {
       throw e;
     }
     try {
-      await route(req, res, path, url, who, { config, backends, keys, ledger, credentials, policy });
+      await route(req, res, path, url, who, {
+        config,
+        backends,
+        keys,
+        ledger,
+        credentials,
+        policy,
+        admissions,
+        admit,
+      });
     } catch (e) {
       if (!res.headersSent)
         json(res, 500, { error: { code: "internal", message: "Kvasir could not answer" } });
@@ -79,7 +127,7 @@ export function build(config: Config): Kvasir {
       console.error("kvasir:", e instanceof Error ? e.message : e);
     }
   });
-  return {
+  const k: Kvasir = {
     config,
     backends,
     store,
@@ -88,6 +136,8 @@ export function build(config: Config): Kvasir {
     auth,
     credentials,
     policy,
+    admissions,
+    admit,
     server,
     address: () => {
       const a = server.address();
@@ -101,6 +151,57 @@ export function build(config: Config): Kvasir {
         });
       }),
   };
+  return k;
+}
+
+/** One stream through this process's own pi-messages door, for the overhead measurement. */
+async function* viaDoor(
+  origin: string,
+  model: string,
+  context: import("@earendil-works/pi-ai").Context,
+  maxTokens: number,
+  config: Config,
+): AsyncGenerator<import("@earendil-works/pi-ai").AssistantMessageEvent> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  // the door is reached as this process's own operator: the first token of its token list, or nothing in off mode
+  const first =
+    config.auth.mode === "token"
+      ? Object.keys((config.auth as { tokens?: Record<string, string> }).tokens ?? {})[0]
+      : undefined;
+  if (first) headers.authorization = `Bearer ${first}`;
+  const r = await fetch(`${origin}/v1/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model, context, options: { maxTokens, temperature: 0 } }),
+  });
+  if (!r.ok || !r.body) {
+    yield {
+      type: "error",
+      reason: "error",
+      error: { errorMessage: `the door answered ${r.status}` },
+    } as never;
+    return;
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let at = buffer.indexOf("\n\n");
+    while (at >= 0) {
+      const frame = buffer.slice(0, at);
+      buffer = buffer.slice(at + 2);
+      const data = frame
+        .split("\n")
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).trim())
+        .join("");
+      if (data) yield JSON.parse(data);
+      at = buffer.indexOf("\n\n");
+    }
+  }
 }
 
 async function route(
@@ -116,9 +217,11 @@ async function route(
     ledger: Ledger;
     credentials: Credentials;
     policy: Policy;
+    admissions: Admissions;
+    admit: Kvasir["admit"];
   },
 ): Promise<void> {
-  const { config, backends, keys, ledger, credentials, policy } = k;
+  const { config, backends, keys, ledger, credentials, policy, admissions, admit } = k;
   if (path === "/v1/config" && req.method === "GET") {
     json(res, 200, { ...backends.catalog(config.origin), kvasir: { version: VERSION } });
   } else if (path === "/v1/models" && req.method === "GET") {
@@ -228,6 +331,26 @@ async function route(
       return json(res, 400, { error: { code: "bad_request", message: "secret: the provider's key" } });
     credentials.put(provider, body.secret);
     json(res, 200, { provider, stored: true, shown: "never" });
+  } else if (path === "/v1/admission" && req.method === "GET") {
+    json(res, 200, {
+      records: admissions.list(Math.min(500, Number(url.searchParams.get("limit") ?? 100) || 100)),
+    });
+  } else if (path === "/v1/admission/run" && req.method === "POST") {
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "admission is an admin's" } });
+    const body = JSON.parse(await readBody(req));
+    try {
+      const records = await admit(
+        String(body.backend ?? ""),
+        typeof body.model === "string" ? body.model : undefined,
+        {
+          overhead: body.overhead === true,
+        },
+      );
+      json(res, 200, { records });
+    } catch (e) {
+      json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
+    }
   } else if (path === "/v1/ledger" && req.method === "GET") {
     const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
     json(res, 200, { rows: ledger.rows(holds(who, "admin") ? null : who.subject, limit) });
