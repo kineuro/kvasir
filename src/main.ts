@@ -110,6 +110,85 @@ if (args[0] === "admission") {
   process.exit(2);
 }
 
+// `kvasir models lifecycle list|register|admit|promote|retire` (Wave 5 §9.5):
+// the lifecycle from the command line, on the same database, as the doors do.
+if (args[0] === "models" && args[1] === "lifecycle") {
+  const k = build(config);
+  const by = flag("--by") ?? `${process.env.USER ?? "operator"}@cli`;
+  const verb = args[2];
+  const idOf = () => {
+    const id = Number(flag("--id"));
+    if (!Number.isInteger(id)) {
+      console.error(`kvasir models lifecycle ${verb} --id N`);
+      process.exit(2);
+    }
+    return id;
+  };
+  try {
+    if (verb === "list") {
+      for (const c of k.lifecycle.list()) {
+        const adm = c.admission
+          ? c.admission.passed
+            ? "admitted"
+            : `failed ${c.admission.failed.join(",") || "?"}`
+          : "no admission";
+        console.log(
+          `${c.id}  ${c.backend}/${c.model}  ${c.state}  ${c.source.kind}${c.source.kind === "fine-tune" ? ` job ${c.source.job}` : ""}  ${adm}${c.proposal ? `  proposal ${c.proposal.id} by ${c.proposal.principal}` : ""}`,
+        );
+      }
+    } else if (verb === "register") {
+      const model = flag("--model");
+      const backend = flag("--backend");
+      if (!model || !backend) {
+        console.error(
+          "kvasir models lifecycle register --model ID --backend ID [--job N --recipe JSON] [--notes TEXT]",
+        );
+        process.exit(2);
+      }
+      const job = flag("--job");
+      const source = job
+        ? {
+            kind: "fine-tune" as const,
+            job: /^\d+$/.test(job) ? Number(job) : job,
+            recipe: JSON.parse(flag("--recipe") ?? "{}"),
+          }
+        : { kind: "manual" as const };
+      const c = k.lifecycle.register({ model, backend, source, notes: flag("--notes") ?? null }, by);
+      console.log(`registered candidate ${c.id}: ${c.backend}/${c.model}`);
+    } else if (verb === "admit") {
+      const id = idOf();
+      const c = k.lifecycle.get(id);
+      if (!c) throw new Error(`no candidate ${id}`);
+      const [rec] = await k.admit(c.backend, c.model, { log: (line) => console.log(line) });
+      const after = k.lifecycle.recordAdmission(id, rec, "kvasir admission", VERSION, by);
+      console.log(
+        `candidate ${id}: ${after.state}${rec.passed ? "" : ` (failed ${after.admission?.failed.join(", ")})`}`,
+      );
+      if (!rec.passed) process.exitCode = 1;
+    } else if (verb === "promote") {
+      const id = idOf();
+      const proposal = flag("--proposal") ? { id: flag("--proposal") as string, principal: by } : null;
+      const { candidate, retired } = k.lifecycle.promote(id, by, proposal);
+      console.log(
+        `candidate ${id} promoted: ${candidate.backend}/${candidate.model}${retired ? `; candidate ${retired.id} (${retired.model}) retired` : ""}`,
+      );
+    } else if (verb === "retire") {
+      const id = idOf();
+      const c = k.lifecycle.retire(id, by);
+      console.log(`candidate ${id} retired: ${c.backend}/${c.model}`);
+    } else {
+      console.error("kvasir models lifecycle list | register | admit | promote | retire");
+      process.exit(2);
+    }
+    await k.close();
+    process.exit(process.exitCode ?? 0);
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    await k.close();
+    process.exit(1);
+  }
+}
+
 const k = build(config);
 // the admitted sets from the records, against the runtime each backend reports now (§8.6)
 await k.admissions.load(k.backends, (b) => probeRuntime(b));
