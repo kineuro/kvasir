@@ -1,0 +1,49 @@
+name: deploy
+# Wave 5 W0: every merge to main builds Kvasir here and puts it, with its
+# production dependencies, on the group's guest through the gateway; the guest's
+# own apply script restarts it. The workflow knows a gateway name, a target name
+# and a secret, and nothing else of the deployment.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency: deploy
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: production dependencies only
+        run: npm prune --omit=dev --no-audit --no-fund
+      - name: through the gateway to the guest, then apply
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 600 /dev/null key; printf "%s\n" "$KEY" > key
+          cat > known_hosts <<'KH'
+          ssh.kineuro.se ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAc27JgEFQrzEDT9X+VschGd2qq5EjoDVbb0tFTyzdfX
+          KH
+          cat > sshcfg <<'CFG'
+          Host nils
+            HostName ssh.kineuro.se
+            User deploy:nils-deploy
+            IdentityFile key
+            IdentitiesOnly yes
+            UserKnownHostsFile known_hosts
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+            ServerAliveCountMax 40
+            ProxyCommand openssl s_client -quiet -verify_return_error -verify 5 -connect ssh.kineuro.se:443 -servername ssh.kineuro.se 2>/dev/null
+          CFG
+          mkdir -p out/kvasir && cp -r dist node_modules package.json out/kvasir/
+          rsync -az --delete -e "ssh -F sshcfg" out/kvasir/ nils:/srv/nils/incoming/kvasir/
+          ssh -F sshcfg nils "/srv/nils/bin/apply kvasir"
