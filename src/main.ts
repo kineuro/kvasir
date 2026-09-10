@@ -24,6 +24,45 @@ try {
   process.exit(2);
 }
 
+// `kvasir keys mint --principal P --purposes a,b [--class catalog|rows|identifiers]`:
+// an app's machine key minted on the same database with no server bound, for a
+// deployment whose only admins are people at an identity provider and which
+// therefore has no admin bearer to mint through the door (Wave 5 W0). The
+// secret is printed once, on stdout, and nothing else is.
+if (args[0] === "keys" && args[1] === "mint") {
+  const principal = flag("--principal");
+  if (!principal) {
+    console.error(
+      "kvasir keys mint --principal NAME --purposes a,b [--class catalog|rows|identifiers] [--expires-days N]",
+    );
+    process.exit(2);
+  }
+  const k = build(config);
+  try {
+    const purposes = (flag("--purposes") ?? "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const days = flag("--expires-days");
+    const minted = k.keys.mint(
+      principal,
+      purposes,
+      (flag("--class") ?? "catalog") as never,
+      days ? Date.now() + Number(days) * 86_400_000 : null,
+    );
+    console.error(
+      `kvasir: minted ${minted.id} for ${principal} with ${purposes.length} purpose(s), class ${minted.maxClass}${minted.expiresAt ? `, expires ${new Date(minted.expiresAt).toISOString()}` : ""}`,
+    );
+    console.log(minted.secret);
+    await k.close();
+    process.exit(0);
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    await k.close();
+    process.exit(1);
+  }
+}
+
 // `kvasir admission list|run` (§8.6): the suite from the command line, on
 // the same database, with no server bound but the process's own door for
 // the overhead measurement.
