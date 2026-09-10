@@ -10,6 +10,7 @@ import { Credentials, sealKey } from "./credentials.js";
 import { chatCompletions, json, piMessages, readBody } from "./doors.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
+import { Lifecycle, LifecycleRefused, parseSource } from "./lifecycle.js";
 import { Personal } from "./personal.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
@@ -28,6 +29,8 @@ export interface Kvasir {
   personal: Personal;
   policy: Policy;
   admissions: Admissions;
+  /** The model lifecycle (Wave 5 §9.5): registered, admitted, promoted, retired. */
+  lifecycle: Lifecycle;
   /** The suite over one model, recorded, and the admitted set refreshed (§8.6). */
   admit: (
     backendId: string,
@@ -58,6 +61,9 @@ export function build(config: Config): Kvasir {
   }
   const policy = new Policy(store, config.purposes, backends);
   const admissions = new Admissions(store);
+  const lifecycle = new Lifecycle(store);
+  // a promoted candidate is the model the purposes route to on its backend
+  policy.promoted = (backendId) => lifecycle.promoted(backendId);
   const admit: Kvasir["admit"] = async (backendId, modelId, opts = {}) => {
     const backend = backends.list.find((b) => b.config.id === backendId);
     if (!backend) throw new Error(`no backend ${backendId}`);
@@ -142,6 +148,7 @@ export function build(config: Config): Kvasir {
         personal,
         policy,
         admissions,
+        lifecycle,
         admit,
       });
     } catch (e) {
@@ -162,6 +169,7 @@ export function build(config: Config): Kvasir {
     personal,
     policy,
     admissions,
+    lifecycle,
     admit,
     server,
     address: () => {
@@ -244,10 +252,11 @@ async function route(
     personal: Personal;
     policy: Policy;
     admissions: Admissions;
+    lifecycle: Lifecycle;
     admit: Kvasir["admit"];
   },
 ): Promise<void> {
-  const { config, backends, keys, ledger, credentials, personal, policy, admissions, admit } = k;
+  const { config, backends, keys, ledger, credentials, personal, policy, admissions, lifecycle, admit } = k;
   if (path === "/v1/config" && req.method === "GET") {
     json(res, 200, { ...backends.catalog(config.origin), kvasir: { version: VERSION } });
   } else if (path === "/v1/models" && req.method === "GET") {
@@ -423,6 +432,65 @@ async function route(
     } catch (e) {
       json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
     }
+  } else if (path === "/v1/models/lifecycle" && req.method === "GET") {
+    // Wave 5 §9.5: every candidate with its state and its records; the desk's Teaching page reads it
+    const withEvents = url.searchParams.get("events") === "1";
+    json(res, 200, {
+      candidates: lifecycle.list().map((c) => (withEvents ? { ...c, events: lifecycle.events(c.id) } : c)),
+      promoted: backends.list.map((b) => ({ backend: b.config.id, model: lifecycle.promoted(b.config.id) })),
+    });
+  } else if (path === "/v1/models/lifecycle" && req.method === "POST") {
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "the lifecycle is an admin's" } });
+    const body = JSON.parse(await readBody(req));
+    try {
+      const backend = String(body.backend ?? "");
+      if (!backends.list.some((b) => b.config.id === backend))
+        throw new LifecycleRefused(404, `no backend named ${backend}`);
+      const c = lifecycle.register(
+        {
+          model: String(body.model ?? ""),
+          backend,
+          source: parseSource(body.source),
+          notes: typeof body.notes === "string" ? body.notes : null,
+        },
+        who.subject,
+      );
+      json(res, 201, { candidate: c });
+    } catch (e) {
+      lifecycleError(res, e);
+    }
+  } else if (path.startsWith("/v1/models/lifecycle/") && req.method === "POST") {
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "the lifecycle is an admin's" } });
+    const [idText, verb] = path.slice("/v1/models/lifecycle/".length).split("/");
+    const id = Number(idText);
+    const body = JSON.parse((await readBody(req)) || "{}");
+    try {
+      if (!Number.isInteger(id)) throw new LifecycleRefused(404, `no candidate ${idText}`);
+      const c = lifecycle.get(id);
+      if (!c) throw new LifecycleRefused(404, `no candidate ${id}`);
+      if (verb === "admit") {
+        // the suite through the same runner as POST /v1/admission/run; a failure is recorded and the state stays
+        const [rec] = await admit(c.backend, c.model, { overhead: body.overhead === true });
+        json(res, 200, {
+          candidate: lifecycle.recordAdmission(id, rec, "kvasir admission", VERSION, who.subject),
+          record: rec,
+        });
+      } else if (verb === "promote") {
+        const proposal =
+          body.proposal && (typeof body.proposal.id === "number" || typeof body.proposal.id === "string")
+            ? { id: body.proposal.id, principal: String(body.proposal.principal ?? who.subject) }
+            : null;
+        json(res, 200, lifecycle.promote(id, who.subject, proposal));
+      } else if (verb === "retire") {
+        json(res, 200, { candidate: lifecycle.retire(id, who.subject) });
+      } else {
+        json(res, 404, { error: { code: "no_such_door", message: `${verb} is not a lifecycle verb` } });
+      }
+    } catch (e) {
+      lifecycleError(res, e);
+    }
   } else if (path === "/v1/ledger" && req.method === "GET") {
     const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
     json(res, 200, { rows: ledger.rows(holds(who, "admin") ? null : who.subject, limit) });
@@ -431,6 +499,13 @@ async function route(
       error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
     });
   }
+}
+
+function lifecycleError(res: ServerResponse, e: unknown): void {
+  if (e instanceof LifecycleRefused)
+    json(res, e.status, { error: { code: "lifecycle", message: e.message } });
+  else
+    json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
 }
 
 export function listen(k: Kvasir, bind: string): Promise<string> {

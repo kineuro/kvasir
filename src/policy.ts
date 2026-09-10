@@ -98,6 +98,8 @@ export interface Grant {
 export class Policy {
   readonly purposes: Map<string, Purpose>;
   private readonly grants = new Map<string, Grant>();
+  /** Wave 5 §9.5: the promoted candidate on a backend, when the lifecycle names one; the purposes route to it. */
+  promoted: (backendId: string) => string | null = () => null;
   constructor(
     private readonly store: Store,
     purposes: Purpose[],
@@ -256,7 +258,10 @@ export class Policy {
     }
     // a pin: recorded, never above the policy; a bumped request runs local
     // and the pin, if it named a remote model, is set aside and said so
-    let entry = chosen.config.models[0];
+    const lead = this.promoted(chosen.config.id);
+    let entry =
+      (lead ? chosen.config.models.find((m) => m.id === lead) : undefined) ?? chosen.config.models[0];
+    if (lead && entry?.id === lead) because.push(`${lead} is the promoted model on ${chosen.config.id}`);
     if (opts.pin && opts.bumped && !chosen.config.models.some((m) => m.id === opts.pin)) {
       because.push(
         `the pinned model ${opts.pin} is not local, so the request runs on ${entry?.id ?? "the local model"} instead`,
