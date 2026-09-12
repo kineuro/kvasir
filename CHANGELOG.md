@@ -4,6 +4,12 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.2] - 2026-09-12
+
+### Changed
+
+- A token written in `auth.tokens` opened the gateway only in token mode. It now works beside a trust list as well, so an installer that has the gateway trust an issuer, such as the desk, keeps its own way in to the admin doors it uses, for example to mint the assistant's key. Any other caller still brings a token from a trusted issuer or a minted key, and off mode is unchanged.
+
 ## [1.0.0-alpha.1] - 2026-09-12
 
 ### Security

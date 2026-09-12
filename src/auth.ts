@@ -22,7 +22,7 @@ export interface Trust {
 
 export interface AuthConfig {
   mode: "off" | "token" | "oidc";
-  /** token mode: TOKEN -> "principal@node:role,role". */
+  /** TOKEN -> "principal@node:role,role": the callers of token mode, and beside a trust list the installer's own. */
   tokens?: Record<string, string>;
   trust?: Trust[];
   groupsClaim?: string;
@@ -90,26 +90,31 @@ export class Auth {
       if (!row) throw new Refused(401, "this key is not one Kvasir minted, or it is spent");
       return { subject: row.principal, roles: ["reader"], kind: "key", key: row };
     }
+    // A token the installer wrote opens token mode, and beside a trust list
+    // it stays the installer's own way in: what set the gateway up, such as
+    // the command that mints the assistant's key, still reaches the admin
+    // doors once people sign in through an issuer.
+    const named = bearer ? this.config.tokens?.[bearer] : undefined;
     switch (this.config.mode) {
       case "off":
         return { subject: "operator", roles: [...LADDER], kind: "person" };
-      case "token": {
-        const named = bearer ? this.config.tokens?.[bearer] : undefined;
+      case "token":
         if (!named) throw new Refused(401, "a bearer token this gateway knows");
-        const [principal, list] = named.split(":");
-        const roles = expand(
-          (list ?? "").split(",").filter((r): r is Role => (LADDER as readonly string[]).includes(r)),
-        );
-        if (roles.length === 0)
-          throw new Refused(
-            403,
-            `${principal} holds no role: an installer binds roles before a caller streams`,
-          );
-        return { subject: principal, roles, kind: principal.includes("@") ? "person" : "machine" };
-      }
+        return this.named(named);
       case "oidc":
-        return this.verify(bearer);
+        return named ? this.named(named) : this.verify(bearer);
     }
+  }
+
+  /** The principal a configured token names, "principal@node:role,role". */
+  private named(entry: string): Principal {
+    const [principal, list] = entry.split(":");
+    const roles = expand(
+      (list ?? "").split(",").filter((r): r is Role => (LADDER as readonly string[]).includes(r)),
+    );
+    if (roles.length === 0)
+      throw new Refused(403, `${principal} holds no role: an installer binds roles before a caller streams`);
+    return { subject: principal, roles, kind: principal.includes("@") ? "person" : "machine" };
   }
 
   private async verify(token: string): Promise<Principal> {

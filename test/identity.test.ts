@@ -204,6 +204,31 @@ describe("identity", () => {
     expect(ops.status).toBe(200);
     await ops.text();
   });
+
+  it("takes the installer's token beside a trust list, and no other bearer that is not a trusted token", async () => {
+    const t = JSON.parse(readFileSync(join(vectors, "trust-list.json"), "utf8"));
+    const g = gate();
+    g.open();
+    const { url } = await kvasir(
+      {
+        mode: "oidc",
+        trust: [
+          { issuer: t.trust[1].issuer, audience: t.trust[1].audience, jwks: join(vectors, t.trust[1].jwks) },
+        ],
+        groupsClaim: t.groups_claim,
+        roles: t.roles,
+        tokens: { "the-installers-token": "nils-setup:admin" },
+      },
+      await g.url,
+    );
+    closers.push(async () => (await g.server).close());
+    const installer = await fetch(`${url}/v1/keys`, {
+      headers: { authorization: "Bearer the-installers-token" },
+    });
+    expect(installer.status).toBe(200);
+    const guessed = await fetch(`${url}/v1/keys`, { headers: { authorization: "Bearer a-guessed-token" } });
+    expect(guessed.status).toBe(401);
+  });
 });
 
 describe("minted keys", () => {
