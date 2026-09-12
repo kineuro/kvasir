@@ -95,6 +95,72 @@ export function toPiMessagesEvent(ev: AssistantMessageEvent): Record<string, unk
   }
 }
 
+type Found = NonNullable<ReturnType<Backends["find"]>>;
+
+/** Where a call may go (§8.3), or why it may not. */
+type Decision =
+  | { ok: true; found: Found; granted: Grant | null; purpose: string | null }
+  | { ok: false; refused: PolicyRefused; purpose: string | null };
+
+/**
+ * The purpose of a call (§8.3), whichever door it came through: a grant
+ * already taken, a registered purpose the caller names or its key allows,
+ * or without either a local backend only. The text is read for an
+ * identifier shape, which keeps the call local whatever the table says.
+ */
+function decide(
+  req: IncomingMessage,
+  who: Principal,
+  named: Found,
+  model: string,
+  text: string,
+  policy: Policy,
+  backends: Backends,
+): Decision {
+  let granted: Grant | null = null;
+  let purpose: string | null = null;
+  const grantHeader = String(req.headers["x-kvasir-grant"] ?? "");
+  const purposeHeader = String(req.headers["x-kvasir-purpose"] ?? "");
+  const bumped = identifierShape(text);
+  try {
+    if (grantHeader) {
+      granted = policy.take(grantHeader) ?? null;
+      if (!granted)
+        throw new PolicyRefused(403, [
+          { layer: "policy", fact: "the grant is unknown or expired", relaxation: "ask for a grant again" },
+        ]);
+      if (bumped && granted.locality === "remote") {
+        granted = policy.grant(granted.purpose, {}, { bumped, keyClass: who.key?.maxClass });
+      }
+    } else if (purposeHeader || (who.kind === "key" && (who.key?.purposes.length ?? 0) > 0)) {
+      purpose = purposeHeader || (who.key?.purposes[0] ?? "");
+      if (who.kind === "key" && !who.key?.purposes.includes(purpose)) {
+        throw new PolicyRefused(403, [
+          { layer: "policy", fact: `the key's purposes do not include ${purpose}` },
+        ]);
+      }
+      granted = policy.grant(purpose, {}, { pin: model, bumped, keyClass: who.key?.maxClass });
+    } else if (named.backend.config.locality !== "local") {
+      throw new PolicyRefused(403, [
+        {
+          layer: "policy",
+          fact: "a purpose is required to reach a remote backend; without one a call runs local only",
+          relaxation: "send x-kvasir-purpose, or a grant",
+        },
+      ]);
+    }
+  } catch (e) {
+    if (e instanceof PolicyRefused) return { ok: false, refused: e, purpose };
+    throw e;
+  }
+  // the grant decides the backend and the model; a caller that named another is moved
+  let found = named;
+  if (granted && (granted.model !== named.entry.id || granted.backend !== named.backend.config.id)) {
+    found = backends.find(granted.model) ?? named;
+  }
+  return { ok: true, found, granted, purpose };
+}
+
 /** `POST /v1/messages`: `{model, context, options}` in, the event stream out, one ledger row. */
 export async function piMessages(
   req: IncomingMessage,
@@ -111,8 +177,8 @@ export async function piMessages(
     json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : "not JSON" } });
     return;
   }
-  let found = typeof body.model === "string" ? backends.find(body.model) : undefined;
-  if (!found) {
+  const named = typeof body.model === "string" ? backends.find(body.model) : undefined;
+  if (!named) {
     json(res, 404, {
       error: { code: "no_such_model", message: `no model named ${body.model} in the catalog` },
     });
@@ -122,65 +188,27 @@ export async function piMessages(
     json(res, 400, { error: { code: "bad_request", message: "context: pi's context, with its messages" } });
     return;
   }
-  // The purpose (§8.3): a grant already taken, or a registered purpose the
-  // caller names, or for a minted key one of its allowlist; without any, a
-  // local backend only. The text is read for an identifier shape, which
-  // bumps the class for this request and keeps it local whatever the
-  // table says.
-  let granted: Grant | null = null;
-  let purposeName: string | null = null;
-  const grantHeader = String(req.headers["x-kvasir-grant"] ?? "");
-  const purposeHeader = String(req.headers["x-kvasir-purpose"] ?? "");
-  const bumped = identifierShape(userText(body.context));
-  try {
-    if (grantHeader) {
-      granted = policy.take(grantHeader) ?? null;
-      if (!granted)
-        throw new PolicyRefused(403, [
-          { layer: "policy", fact: "the grant is unknown or expired", relaxation: "ask for a grant again" },
-        ]);
-      if (bumped && granted.locality === "remote") {
-        granted = policy.grant(granted.purpose, {}, { bumped, keyClass: who.key?.maxClass });
-      }
-    } else if (purposeHeader || (who.kind === "key" && (who.key?.purposes.length ?? 0) > 0)) {
-      purposeName = purposeHeader || (who.key?.purposes[0] ?? "");
-      if (who.kind === "key" && !who.key?.purposes.includes(purposeName)) {
-        throw new PolicyRefused(403, [
-          { layer: "policy", fact: `the key's purposes do not include ${purposeName}` },
-        ]);
-      }
-      granted = policy.grant(purposeName, {}, { pin: body.model, bumped, keyClass: who.key?.maxClass });
-    } else if (found.backend.config.locality !== "local") {
-      throw new PolicyRefused(403, [
-        {
-          layer: "policy",
-          fact: "a purpose is required to reach a remote backend; without one a call runs local only",
-          relaxation: "send x-kvasir-purpose, or a grant",
-        },
-      ]);
-    }
-  } catch (e) {
-    if (e instanceof PolicyRefused) {
-      const first = e.refusals[0];
-      ledger.record(
-        row(who, found, {
-          outcome: "refused",
-          refusal: { layer: first.layer, fact: first.fact },
-          purpose: purposeName,
-        }),
-      );
-      json(res, e.status, {
-        error: { code: "refused", layer: first.layer, message: first.fact, refusals: e.refusals },
-      });
-      return;
-    }
-    throw e;
+  const decision = decide(req, who, named, String(body.model), userText(body.context), policy, backends);
+  if (!decision.ok) {
+    const first = decision.refused.refusals[0];
+    ledger.record(
+      row(who, named, {
+        outcome: "refused",
+        refusal: { layer: first.layer, fact: first.fact },
+        purpose: decision.purpose,
+      }),
+    );
+    json(res, decision.refused.status, {
+      error: {
+        code: "refused",
+        layer: first.layer,
+        message: first.fact,
+        refusals: decision.refused.refusals,
+      },
+    });
+    return;
   }
-  // the grant decides the backend and the model; a caller that named another is moved
-  if (granted && (granted.model !== found.entry.id || granted.backend !== found.backend.config.id)) {
-    const to = backends.find(granted.model);
-    if (to) found = to;
-  }
+  const { found, granted, purpose } = decision;
   const controller = new AbortController();
   req.on("close", () => controller.abort());
   const started = Date.now();
@@ -198,7 +226,15 @@ export async function piMessages(
       errorMessage: `refused at the ${refusal.layer} layer: ${refusal.fact}`,
     });
     res.end();
-    ledger.record(row(who, found, { outcome: "refused", refusal, totalMs: Date.now() - started }));
+    ledger.record(
+      row(who, found, {
+        outcome: "refused",
+        refusal,
+        totalMs: Date.now() - started,
+        purpose: granted?.purpose ?? purpose,
+        grantId: granted?.grant ?? null,
+      }),
+    );
     return;
   }
   const o = body.options ?? {};
@@ -245,7 +281,7 @@ export async function piMessages(
       ttftMs,
       totalMs,
       gpuSeconds: found.backend.config.locality === "local" ? totalMs / 1000 : 0,
-      purpose: granted?.purpose ?? purposeName,
+      purpose: granted?.purpose ?? purpose,
       grantId: granted?.grant ?? null,
     }),
   );
@@ -313,11 +349,19 @@ function emptyUsage() {
   };
 }
 
-/** `POST /v1/chat/completions`: the OpenAI shape for a notebook or a script (§8.2). */
+/**
+ * `POST /v1/chat/completions`: the OpenAI shape for a notebook or a script
+ * (§8.2). It goes the way the messages door goes: the purpose and the policy
+ * decide where the call may run, it waits its turn in the backend's queue,
+ * and it is one ledger row.
+ */
 export async function chatCompletions(
   req: IncomingMessage,
   res: ServerResponse,
   backends: Backends,
+  who: Principal,
+  ledger: Ledger,
+  policy: Policy,
 ): Promise<void> {
   let body: {
     model?: string;
@@ -334,10 +378,10 @@ export async function chatCompletions(
     });
     return;
   }
-  const found = typeof body.model === "string" ? backends.find(body.model) : undefined;
-  if (!found || !Array.isArray(body.messages)) {
-    json(res, found ? 400 : 404, {
-      error: { message: found ? "messages" : `no model named ${body.model}`, type: "invalid_request_error" },
+  const named = typeof body.model === "string" ? backends.find(body.model) : undefined;
+  if (!named || !Array.isArray(body.messages)) {
+    json(res, named ? 400 : 404, {
+      error: { message: named ? "messages" : `no model named ${body.model}`, type: "invalid_request_error" },
     });
     return;
   }
@@ -350,52 +394,140 @@ export async function chatCompletions(
       context.messages.push({
         role: "assistant",
         content: [{ type: "text", text }],
-        api: found.backend.config.kind,
-        provider: found.backend.config.id,
-        model: found.entry.id,
+        api: named.backend.config.kind,
+        provider: named.backend.config.id,
+        model: named.entry.id,
         usage: emptyUsage(),
         stopReason: "stop",
         timestamp: Date.now(),
       } as never);
     }
   }
+  const decision = decide(req, who, named, String(body.model), userText(context), policy, backends);
+  if (!decision.ok) {
+    const first = decision.refused.refusals[0];
+    ledger.record(
+      row(who, named, {
+        outcome: "refused",
+        refusal: { layer: first.layer, fact: first.fact },
+        purpose: decision.purpose,
+      }),
+    );
+    json(res, decision.refused.status, {
+      error: {
+        message: first.fact,
+        type: "refused",
+        code: "refused",
+        layer: first.layer,
+        refusals: decision.refused.refusals,
+      },
+    });
+    return;
+  }
+  const { found, granted, purpose } = decision;
+  const ledgerRow = (over: Partial<Row>) =>
+    ledger.record(
+      row(who, found, { purpose: granted?.purpose ?? purpose, grantId: granted?.grant ?? null, ...over }),
+    );
   const id = `chatcmpl-${Date.now().toString(36)}`;
   const created = Math.floor(Date.now() / 1000);
   const controller = new AbortController();
   req.on("close", () => controller.abort());
-  const events = found.backend.stream(found.entry, context, {
-    temperature: body.temperature,
-    maxTokens: body.max_tokens,
-    signal: controller.signal,
-  });
-  if (body.stream) {
-    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-    const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
-      res.write(
-        `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: found.entry.id, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`,
-      );
-    chunk({ role: "assistant", content: "" });
-    for await (const ev of events) {
-      if (ev.type === "text_delta") chunk({ content: ev.delta });
-      else if (ev.type === "thinking_delta") chunk({ reasoning_content: ev.delta });
-      else if (ev.type === "done") chunk({}, ev.reason === "length" ? "length" : "stop");
-      else if (ev.type === "error") chunk({}, "stop");
+  const started = Date.now();
+  const stream = body.stream === true;
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
+    res.write(
+      `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: found.entry.id, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`,
+    );
+  // the queue (§8.7): a stream's headers go out now and a heartbeat keeps the socket while it waits
+  if (stream) res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  let release: (() => void) | null = null;
+  try {
+    release = await found.backend.admission.acquire(
+      stream ? () => res.write(": queued\n\n") : undefined,
+      controller.signal,
+    );
+  } catch (e) {
+    const refusal = e instanceof RefusedAdmission ? e.refusal : { layer: "health" as const, fact: "no slot" };
+    const message = `refused at the ${refusal.layer} layer: ${refusal.fact}`;
+    if (stream) {
+      res.write(`data: ${JSON.stringify({ error: { message, type: "refused", code: "refused" } })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } else {
+      json(res, 503, { error: { message, type: "refused", code: "refused", layer: refusal.layer } });
     }
+    ledgerRow({ outcome: "refused", refusal, totalMs: Date.now() - started });
+    return;
+  }
+  let ttftMs: number | null = null;
+  let outcome: Row["outcome"] = "completed";
+  let counted: Partial<Row> | null = null;
+  let text = "";
+  let reasoning = "";
+  let finish = "stop";
+  let tokens = { input: 0, output: 0, total: 0 };
+  try {
+    if (stream) chunk({ role: "assistant", content: "" });
+    for await (const ev of found.backend.stream(found.entry, context, {
+      temperature: body.temperature,
+      maxTokens: body.max_tokens,
+      signal: controller.signal,
+      subject: who.subject,
+    })) {
+      if (
+        ttftMs === null &&
+        (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta")
+      ) {
+        ttftMs = Date.now() - started;
+      }
+      if (ev.type === "text_delta") {
+        text += ev.delta;
+        if (stream) chunk({ content: ev.delta });
+      } else if (ev.type === "thinking_delta") {
+        reasoning += ev.delta;
+        if (stream) chunk({ reasoning_content: ev.delta });
+      } else if (ev.type === "done") {
+        counted = counts(ev.message.usage);
+        tokens = {
+          input: ev.message.usage.input,
+          output: ev.message.usage.output,
+          total: ev.message.usage.totalTokens,
+        };
+        finish = ev.reason === "length" ? "length" : "stop";
+        if (ev.reason === "length") outcome = "capped";
+        if (stream) chunk({}, finish);
+      } else if (ev.type === "error") {
+        counted = counts(ev.error.usage);
+        outcome = ev.reason === "aborted" ? "aborted" : "error";
+        if (stream) chunk({}, "stop");
+      }
+    }
+  } catch (e) {
+    found.backend.health.lastError = e instanceof Error ? e.message : String(e);
+    outcome = controller.signal.aborted ? "aborted" : "error";
+  } finally {
+    release();
+  }
+  const totalMs = Date.now() - started;
+  ledgerRow({
+    ...(counted ?? {}),
+    outcome,
+    ttftMs,
+    totalMs,
+    gpuSeconds: found.backend.config.locality === "local" ? totalMs / 1000 : 0,
+  });
+  if (stream) {
     res.write("data: [DONE]\n\n");
     res.end();
     return;
   }
-  let text = "";
-  let reasoning = "";
-  let finish = "stop";
-  let usage = emptyUsage();
-  for await (const ev of events) {
-    if (ev.type === "text_delta") text += ev.delta;
-    else if (ev.type === "thinking_delta") reasoning += ev.delta;
-    else if (ev.type === "done") {
-      finish = ev.reason === "length" ? "length" : "stop";
-      usage = ev.message.usage;
-    }
+  if (outcome === "error") {
+    // a provider error body never leaves: a fixed sentence (§8.7)
+    json(res, 502, {
+      error: { message: "the backend did not answer", type: "server_error", code: "backend" },
+    });
+    return;
   }
   json(res, 200, {
     id,
@@ -409,6 +541,6 @@ export async function chatCompletions(
         finish_reason: finish,
       },
     ],
-    usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.totalTokens },
+    usage: { prompt_tokens: tokens.input, completion_tokens: tokens.output, total_tokens: tokens.total },
   });
 }

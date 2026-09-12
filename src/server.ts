@@ -6,7 +6,7 @@ import { Admissions } from "./admission-records.js";
 import { Auth, holds, type Principal, Refused } from "./auth.js";
 import { Backends } from "./backends.js";
 import { type Config, pepper } from "./config.js";
-import { Credentials, sealKey } from "./credentials.js";
+import { Credentials, openSeal } from "./credentials.js";
 import { chatCompletions, json, piMessages, readBody } from "./doors.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
@@ -16,7 +16,7 @@ import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
 import { measureOverhead, runSuite } from "./suite.js";
 
-export const VERSION = "1.0.0-alpha.0";
+export const VERSION = "1.0.0-alpha.1";
 
 export interface Kvasir {
   config: Config;
@@ -48,7 +48,7 @@ export function build(config: Config): Kvasir {
   const keys = new Keys(store, pepper(config.pepperFile));
   const ledger = new Ledger(store);
   const auth = new Auth(config.auth, keys);
-  const seal = sealKey(config.sealKeyFile);
+  const seal = openSeal(config.sealKeyFile, store, (line) => console.error(`kvasir: ${line}`));
   const credentials = new Credentials(store, seal);
   const personal = new Personal(store, seal, config.oauth, config.origin);
   for (const b of backends.list) {
@@ -267,7 +267,7 @@ async function route(
   } else if (path === "/v1/messages" && req.method === "POST") {
     await piMessages(req, res, backends, who, ledger, policy);
   } else if (path === "/v1/chat/completions" && req.method === "POST") {
-    await chatCompletions(req, res, backends);
+    await chatCompletions(req, res, backends, who, ledger, policy);
   } else if (path === "/v1/keys" && req.method === "GET") {
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "the keys are an admin's" } });

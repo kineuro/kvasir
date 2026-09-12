@@ -8,3 +8,6 @@ dist/
 *.db
 kvasir.json
 !kvasir.example.json
+kvasir.seal
+kvasir.seal.new
+kvasir.pepper
