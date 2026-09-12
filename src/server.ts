@@ -16,7 +16,7 @@ import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
 import { measureOverhead, runSuite } from "./suite.js";
 
-export const VERSION = "1.0.0-alpha.1";
+export const VERSION = "1.0.0-alpha.2";
 
 export interface Kvasir {
   config: Config;
