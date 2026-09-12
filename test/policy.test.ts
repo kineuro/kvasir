@@ -335,3 +335,62 @@ describe("purposes and the policy table", () => {
     expect((await r.json()).error.message).toContain("class is catalog");
   });
 });
+
+describe("the OpenAI-shaped door", () => {
+  it("keeps the purpose, the policy, the queue and the ledger of the messages door", async () => {
+    const local = await runtime();
+    const remote = await runtime();
+    closers.push(
+      () => local.server.close(),
+      () => remote.server.close(),
+    );
+    const { k, url } = await kvasir(local.url, remote.url);
+    for (const b of k.backends.list) b.health.warming = false;
+    await fetch(`${url}/v1/credentials/minimax`, {
+      method: "PUT",
+      headers: admin,
+      body: JSON.stringify({ secret: "sk-minimax-test-secret-value" }),
+    });
+    const chat = (model: string, content: string, extra: Record<string, string> = {}) =>
+      fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { ...admin, ...extra },
+        body: JSON.stringify({ model, messages: [{ role: "user", content }] }),
+      });
+    // without a purpose a remote model is refused, and nothing reaches the vendor
+    let r = await chat("remote-m", "count the sessions");
+    expect(r.status).toBe(403);
+    expect((await r.json()).error.layer).toBe("policy");
+    expect(remote.bearers).toEqual([]);
+    // a local model needs no purpose
+    r = await chat("local-m", "count the sessions");
+    expect(r.status).toBe(200);
+    expect((await r.json()).choices[0].message.content).toBe("ok");
+    // once the table maps a catalogue purpose to the vendor, that purpose reaches it
+    r = await fetch(`${url}/v1/purposes/assistant.title/policy`, {
+      method: "PUT",
+      headers: admin,
+      body: JSON.stringify({ backend: "vendor" }),
+    });
+    expect(r.status).toBe(200);
+    r = await chat("remote-m", "name this conversation", { "x-kvasir-purpose": "assistant.title" });
+    expect(r.status).toBe(200);
+    expect((await r.json()).model).toBe("remote-m");
+    expect(remote.bearers).toEqual(["Bearer sk-minimax-test-secret-value"]);
+    // an identifier shape keeps even that purpose local
+    r = await chat("remote-m", "find the person born 19850412-1234", {
+      "x-kvasir-purpose": "assistant.title",
+    });
+    expect(r.status).toBe(200);
+    expect((await r.json()).model).toBe("local-m");
+    expect(remote.bearers).toHaveLength(1);
+    // every call is a ledger row, the refusal too
+    const ledger = await (await fetch(`${url}/v1/ledger`, { headers: admin })).json();
+    expect(ledger.rows.map((row: { outcome: string }) => row.outcome)).toEqual([
+      "completed",
+      "completed",
+      "completed",
+      "refused",
+    ]);
+  });
+});
