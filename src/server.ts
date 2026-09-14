@@ -178,6 +178,8 @@ export function build(config: Config): Kvasir {
     },
     close: () =>
       new Promise((resolve) => {
+        // a warm-up still being tried ends with the server
+        for (const b of backends.list) b.stop();
         server.close(() => {
           store.close();
           resolve();

@@ -4,6 +4,10 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- A local backend whose warm-up failed at start is tried again until it answers: after five seconds, then waits doubling to a minute, then every minute. One failed try, a network not up yet at boot or a model still loading, used to leave the backend warming, and every request to it refused, until Kvasir was started again.
+
 ## [1.0.0-alpha.3] - 2026-09-14
 
 ### Added

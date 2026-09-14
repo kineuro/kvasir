@@ -20,6 +20,9 @@ export interface Health {
   concurrency: number;
 }
 
+/** The waits between warm-up tries (§8.5): five seconds, doubling to a minute, then a minute each. */
+export const WARM_WAITS = [5_000, 10_000, 20_000, 40_000, 60_000];
+
 export class Backend {
   readonly config: BackendConfig;
   private readonly key: string | undefined;
@@ -29,6 +32,10 @@ export class Backend {
   readonly admission: Admission;
   /** The models of this backend that passed the suite for the current runtime (§8.6); every model of a remote backend. */
   readonly admitted = new Set<string>();
+  /** Kvasir is closing: a warm-up still being tried ends, and none starts. */
+  private stopped = false;
+  private readonly quiet = new AbortController();
+  private wake: (() => void) | null = null;
 
   constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000) {
     this.config = config;
@@ -124,15 +131,15 @@ export class Backend {
     }
   }
 
-  /** The warm-up at start (§8.5): one short request whose first token ends warming. */
+  /** The warm-up (§8.5): one short request whose first token ends warming. */
   async warmup(): Promise<void> {
     const entry = this.config.models[0];
-    if (!entry || this.config.warmup === false) return;
+    if (!entry || this.config.warmup === false || this.stopped) return;
     try {
       const events = this.stream(
         entry,
         { messages: [{ role: "user", content: "Say ready.", timestamp: Date.now() }] },
-        { maxTokens: 8 },
+        { maxTokens: 8, signal: this.quiet.signal },
       );
       for await (const _ of events) {
         // the first delta flips warming inside stream()
@@ -140,6 +147,38 @@ export class Backend {
     } catch (e) {
       this.health.lastError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /**
+   * The warm-up tried again until a first token (§8.5), each wait longer than
+   * the one before and the last one repeated: a runtime that did not answer at
+   * start, because the network was not up yet at boot or the model was still
+   * loading, is warm once it answers. One failed try used to leave the backend
+   * warming, and every request to it refused, until Kvasir was started again.
+   */
+  async keepWarm(waits: number[] = WARM_WAITS, say: (line: string) => void = () => {}): Promise<void> {
+    if (this.config.warmup === false || !this.config.models[0]) return;
+    for (let tries = 1; this.health.warming && !this.stopped; tries += 1) {
+      const wait = waits[Math.min(tries - 1, waits.length - 1)] ?? 60_000;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, wait);
+        this.wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      this.wake = null;
+      if (this.stopped || !this.health.warming) return;
+      await this.warmup();
+      if (!this.health.warming) say(`${this.config.id}: warm after ${tries + 1} tries`);
+    }
+  }
+
+  /** Kvasir is closing: a warm-up being tried ends, and none starts. */
+  stop(): void {
+    this.stopped = true;
+    this.quiet.abort();
+    this.wake?.();
   }
 }
 
