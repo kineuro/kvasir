@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { Admissions } from "./admission-records.js";
 import { Auth, holds, type Principal, Refused } from "./auth.js";
 import { type Backend, Backends } from "./backends.js";
+import { chatgptAuth, chatgptBackend, chatgptModels } from "./chatgpt.js";
 import { type Config, pepper } from "./config.js";
 import { Credentials, openSeal } from "./credentials.js";
 import { chatCompletions, json, piMessages, readBody } from "./doors.js";
@@ -15,6 +16,7 @@ import { Ledger } from "./ledger.js";
 import { Lifecycle, LifecycleRefused, parseSource } from "./lifecycle.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
+import { CHATGPT, type SubscriptionAuth, Subscriptions, SYSTEM } from "./subscriptions.js";
 import { measureOverhead, probeRuntime, runSuite } from "./suite.js";
 
 /** Kvasir's version, as its package names it. */
@@ -31,6 +33,8 @@ export interface Kvasir {
   credentials: Credentials;
   /** The models Kvasir holds: tried, added, served and removed (record 23). */
   held: Held;
+  /** Each person's own ChatGPT subscription, or the install's where nobody signs in (record 23). */
+  subscriptions: Subscriptions;
   policy: Policy;
   admissions: Admissions;
   /** The model lifecycle (Wave 5 §9.5): registered, admitted, promoted, retired. */
@@ -46,17 +50,28 @@ export interface Kvasir {
   close: () => Promise<void>;
 }
 
-export function build(config: Config): Kvasir {
+export function build(config: Config, options: { subscriptionAuth?: () => SubscriptionAuth } = {}): Kvasir {
   const store = new Store(config.store);
   const backends = new Backends(config.admission);
   const keys = new Keys(store, pepper(config.pepperFile));
   const ledger = new Ledger(store);
   const auth = new Auth(config.auth, keys);
-  const credentials = new Credentials(store, openSeal(config.sealKeyFile));
+  const seal = openSeal(config.sealKeyFile);
+  const credentials = new Credentials(store, seal);
   const policy = new Policy(store, config.purposes, backends);
   // the models this database holds, served from the start; a purpose mapped to one let go returns to its default
   const held = new Held(store, backends, credentials, (id) => policy.forget(id));
   held.sync();
+  // ChatGPT through each person's own subscription: Kvasir's own backend, served beside the added ones (record 23)
+  const subscriptions = new Subscriptions(
+    store,
+    seal,
+    chatgptModels(),
+    options.subscriptionAuth ?? chatgptAuth,
+  );
+  backends.add(chatgptBackend(backends, subscriptions));
+  policy.subscribed = (subject) => subscriptions.has(subject);
+  policy.subscriptionModel = (subject) => subscriptions.model(subject);
   const admissions = new Admissions(store);
   const lifecycle = new Lifecycle(store);
   // a promoted candidate is the model the purposes route to on its backend
@@ -126,6 +141,8 @@ export function build(config: Config): Kvasir {
         ledger,
         credentials,
         held,
+        subscriptions,
+        auth,
         policy,
         admissions,
         lifecycle,
@@ -147,6 +164,7 @@ export function build(config: Config): Kvasir {
     auth,
     credentials,
     held,
+    subscriptions,
     policy,
     admissions,
     lifecycle,
@@ -233,13 +251,28 @@ async function route(
     ledger: Ledger;
     credentials: Credentials;
     held: Held;
+    subscriptions: Subscriptions;
+    auth: Auth;
     policy: Policy;
     admissions: Admissions;
     lifecycle: Lifecycle;
     admit: Kvasir["admit"];
   },
 ): Promise<void> {
-  const { config, backends, keys, ledger, credentials, held, policy, admissions, lifecycle, admit } = k;
+  const {
+    config,
+    backends,
+    keys,
+    ledger,
+    credentials,
+    held,
+    subscriptions,
+    auth,
+    policy,
+    admissions,
+    lifecycle,
+  } = k;
+  const { admit } = k;
   if (path === "/v1/config" && req.method === "GET") {
     json(res, 200, { ...backends.catalog(config.origin), kvasir: { version: VERSION } });
   } else if (path === "/v1/models" && req.method === "GET") {
@@ -248,9 +281,11 @@ async function route(
       .models.map((m) => ({ id: m.id, object: "model", owned_by: m.backend }));
     json(res, 200, { object: "list", data: models });
   } else if (path === "/v1/messages" && req.method === "POST") {
-    await piMessages(req, res, backends, who, ledger, policy);
+    const subject = await streamSubject(req, res, who, auth, config);
+    if (subject !== null) await piMessages(req, res, backends, who, ledger, policy, subject);
   } else if (path === "/v1/chat/completions" && req.method === "POST") {
-    await chatCompletions(req, res, backends, who, ledger, policy);
+    const subject = await streamSubject(req, res, who, auth, config);
+    if (subject !== null) await chatCompletions(req, res, backends, who, ledger, policy, subject);
   } else if (path === "/v1/keys" && req.method === "GET") {
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "the keys are an admin's" } });
@@ -296,6 +331,7 @@ async function route(
         pin: typeof body.pin === "string" ? body.pin : null,
         bumped,
         keyClass: who.key?.maxClass,
+        subject: config.auth.mode === "off" ? SYSTEM : who.subject,
       });
       json(res, 200, g);
     } catch (e) {
@@ -344,6 +380,7 @@ async function route(
           max_tokens: m.maxTokens,
           admitted: b.config.locality === "remote" ? null : b.admitted.has(m.id),
         })),
+        builtin: b.config.builtin === true,
         concurrency: b.config.concurrency,
         health: { ...b.health, queued: b.admission.queued },
       })),
@@ -397,6 +434,49 @@ async function route(
       return json(res, 400, { error: { code: "bad_request", message: "secret: the provider's key" } });
     credentials.put(provider, body.secret);
     json(res, 200, { provider, stored: true, shown: "never" });
+  } else if (path === "/v1/subscriptions" && req.method === "GET") {
+    // record 23: a person's own subscription, or the install's where nobody signs in
+    const whose = subscriberOf(who, config);
+    if (!whose)
+      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    json(res, 200, { subscriptions: [subscriptions.status(whose.subject, whose.for)] });
+  } else if (path === `/v1/subscriptions/${CHATGPT}/sign-in` && req.method === "POST") {
+    const whose = subscriberOf(who, config);
+    if (!whose)
+      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    try {
+      const waiting = await subscriptions.signIn(whose.subject);
+      json(res, 200, {
+        state: "waiting",
+        user_code: waiting.userCode,
+        verification_uri: waiting.verificationUri,
+        expires_at: waiting.expiresAt,
+      });
+    } catch (e) {
+      json(res, 502, {
+        error: {
+          code: "sign_in",
+          message: `ChatGPT did not start the sign-in: ${e instanceof Error ? e.message : String(e)}`,
+        },
+      });
+    }
+  } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "PUT") {
+    const whose = subscriberOf(who, config);
+    if (!whose)
+      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    const body = JSON.parse((await readBody(req)) || "{}");
+    try {
+      subscriptions.choose(whose.subject, String(body.model ?? ""));
+      json(res, 200, subscriptions.status(whose.subject, whose.for));
+    } catch (e) {
+      json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
+    }
+  } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "DELETE") {
+    const whose = subscriberOf(who, config);
+    if (!whose)
+      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    res.writeHead(subscriptions.signOut(whose.subject) ? 204 : 404);
+    res.end();
   } else if (path === "/v1/admission" && req.method === "GET") {
     json(res, 200, {
       records: admissions.list(Math.min(500, Number(url.searchParams.get("limit") ?? 100) || 100)),
@@ -422,7 +502,10 @@ async function route(
     const withEvents = url.searchParams.get("events") === "1";
     json(res, 200, {
       candidates: lifecycle.list().map((c) => (withEvents ? { ...c, events: lifecycle.events(c.id) } : c)),
-      promoted: backends.list.map((b) => ({ backend: b.config.id, model: lifecycle.promoted(b.config.id) })),
+      // Kvasir's own ChatGPT backend has no candidates of its own
+      promoted: backends.list
+        .filter((b) => !b.config.builtin)
+        .map((b) => ({ backend: b.config.id, model: lifecycle.promoted(b.config.id) })),
     });
   } else if (path === "/v1/models/lifecycle" && req.method === "POST") {
     if (!holds(who, "admin"))
@@ -491,6 +574,42 @@ function lifecycleError(res: ServerResponse, e: unknown): void {
     json(res, e.status, { error: { code: "lifecycle", message: e.message } });
   else
     json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
+}
+
+/**
+ * Whose stream this is (record 23): the install's where nobody signs in; a
+ * person calling with their own token, theirs; an app's key calling for a
+ * person, that person's, named in `x-kvasir-person` with their own token and
+ * verified. A person token that does not verify is refused rather than
+ * streamed as the app.
+ */
+async function streamSubject(
+  req: IncomingMessage,
+  res: ServerResponse,
+  who: Principal,
+  auth: Auth,
+  config: Config,
+): Promise<string | null> {
+  if (config.auth.mode === "off") return SYSTEM;
+  const token = String(req.headers["x-kvasir-person"] ?? "").trim();
+  if (!token || who.kind === "person") return who.subject;
+  try {
+    return (await auth.person(token)).subject;
+  } catch (e) {
+    json(res, 401, {
+      error: {
+        code: "unauthenticated",
+        message: e instanceof Error ? e.message : "the person's token did not verify",
+      },
+    });
+    return null;
+  }
+}
+
+/** Whose subscription a caller manages: their own as a person, the install's where nobody signs in; an app or a key manages none. */
+function subscriberOf(who: Principal, config: Config): { subject: string; for: "person" | "system" } | null {
+  if (config.auth.mode === "off") return { subject: SYSTEM, for: "system" };
+  return who.kind === "person" ? { subject: who.subject, for: "person" } : null;
 }
 
 function heldError(res: ServerResponse, e: unknown): void {

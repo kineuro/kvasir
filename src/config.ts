@@ -7,9 +7,12 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 
-export type BackendKind = "openai-completions" | "anthropic-messages";
+export type BackendKind = "openai-completions" | "anthropic-messages" | "openai-codex-responses";
 
-/** The adapters Kvasir has (§8.1): a fixed list in code, never a URL a caller names. */
+/**
+ * The adapters an admin adds a backend with (§8.1): a fixed list in code, never a URL a caller
+ * names. ChatGPT through a person's own subscription is Kvasir's own backend, never added.
+ */
 export const BACKEND_KINDS: BackendKind[] = ["openai-completions", "anthropic-messages"];
 
 export interface ModelEntry {
@@ -56,6 +59,8 @@ export interface BackendConfig {
    * that opens thinking in the prompt; "off" not at all.
    */
   inlineReasoning?: import("./reasoning.js").InlineReasoning;
+  /** Kvasir's own backend, never added, stored or removed: ChatGPT through each person's own subscription (record 23). */
+  builtin?: boolean;
 }
 
 export interface Config {

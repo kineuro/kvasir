@@ -100,6 +100,9 @@ export class Policy {
   private readonly grants = new Map<string, Grant>();
   /** Wave 5 §9.5: the promoted candidate on a backend, when the lifecycle names one; the purposes route to it. */
   promoted: (backendId: string) => string | null = () => null;
+  /** Whether a subject has a ChatGPT subscription signed in, and the model its streams use (record 23). */
+  subscribed: (subject: string) => boolean = () => false;
+  subscriptionModel: (subject: string) => string | null = () => null;
   constructor(
     private readonly store: Store,
     purposes: Purpose[],
@@ -217,7 +220,7 @@ export class Policy {
   grant(
     purposeId: string,
     need: Need,
-    opts: { pin?: string | null; bumped?: string | null; keyClass?: ContentClass },
+    opts: { pin?: string | null; bumped?: string | null; keyClass?: ContentClass; subject?: string | null },
   ): Grant {
     const p = this.purposes.get(purposeId);
     if (!p)
@@ -236,7 +239,7 @@ export class Policy {
     const refusals: Refusal[] = [];
     // the backend the table names, or the local default; a bumped request runs local whatever the table says
     const row = this.row(purposeId);
-    const chosen = opts.bumped
+    let chosen = opts.bumped
       ? this.defaultBackend(p)
       : row
         ? this.backends.list.find((b) => b.config.id === row.backend)
@@ -248,6 +251,26 @@ export class Policy {
       );
     else if (row) because.push(`the policy table maps ${purposeId} to ${row.backend}`);
     else because.push(`${purposeId} has no row in the policy table, and the default is local`);
+    // a purpose moved to ChatGPT goes to the subscription of the person streaming; for someone with
+    // none signed in it runs on the default, and where there is no default it says how to go on (record 23)
+    let subscribed: string | null = null;
+    if (chosen?.config.builtin && opts.subject && this.subscribed(opts.subject)) {
+      subscribed = this.subscriptionModel(opts.subject);
+      because.push(`${opts.subject} has a ChatGPT subscription signed in, and ${purposeId} goes to it`);
+    } else if (chosen?.config.builtin) {
+      chosen = this.defaultBackend(p);
+      if (!chosen)
+        throw new Refused(409, [
+          {
+            layer: "policy",
+            fact: `${purposeId} goes to each person's own ChatGPT subscription, and none is signed in for this stream`,
+            relaxation: "sign in with your ChatGPT subscription",
+          },
+        ]);
+      because.push(
+        `no ChatGPT subscription is signed in for this stream, so ${purposeId} runs on the default`,
+      );
+    }
     if (!chosen)
       throw new Refused(503, [
         {
@@ -265,7 +288,9 @@ export class Policy {
     // and the pin, if it named a remote model, is set aside and said so
     const lead = this.promoted(chosen.config.id);
     let entry =
-      (lead ? chosen.config.models.find((m) => m.id === lead) : undefined) ?? chosen.config.models[0];
+      (subscribed ? chosen.config.models.find((m) => m.id === subscribed) : undefined) ??
+      (lead ? chosen.config.models.find((m) => m.id === lead) : undefined) ??
+      chosen.config.models[0];
     if (lead && entry?.id === lead) because.push(`${lead} is the promoted model on ${chosen.config.id}`);
     if (opts.pin && opts.bumped && !chosen.config.models.some((m) => m.id === opts.pin)) {
       because.push(
@@ -273,8 +298,16 @@ export class Policy {
       );
     } else if (opts.pin) {
       const pinned = chosen.config.models.find((m) => m.id === opts.pin);
-      if (!pinned) {
-        const elsewhere = this.backends.find(opts.pin);
+      const elsewhere = pinned ? undefined : this.backends.find(opts.pin);
+      if (pinned && !subscribed) {
+        entry = pinned;
+        because.push(`pinned to ${opts.pin} by the caller, recorded`);
+      } else if (!pinned && elsewhere && (row || subscribed)) {
+        // an admin's mapping moves the call, whatever model the caller named (record 23)
+        because.push(
+          `${opts.pin} was named by the caller, and the policy table sends ${purposeId} to ${chosen.config.id}, so it runs on ${entry?.id ?? chosen.config.id}`,
+        );
+      } else if (!pinned) {
         if (elsewhere) {
           refusals.push({
             layer: "policy",
@@ -284,8 +317,6 @@ export class Policy {
         } else refusals.push({ layer: "deployment", fact: `no model named ${opts.pin}` });
         throw new Refused(403, refusals);
       }
-      entry = pinned;
-      because.push(`pinned to ${opts.pin} by the caller, recorded`);
     }
     if (!entry)
       throw new Refused(503, [{ layer: "deployment", fact: `${chosen.config.id} serves no model` }]);

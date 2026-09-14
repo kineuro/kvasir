@@ -77,7 +77,8 @@ describe("the models Kvasir holds", () => {
   it("start as none, and a kvasir.json that still names backends is refused", async () => {
     const { url } = await kvasir();
     const listed = await (await fetch(`${url}/v1/backends`, { headers: reader })).json();
-    expect(listed.backends).toEqual([]);
+    // Kvasir's own ChatGPT backend is there from the start; nothing an admin added is
+    expect(listed.backends.filter((b: { builtin: boolean }) => !b.builtin)).toEqual([]);
     expect(() => parse(JSON.stringify({ bind: "x", origin: "http://x", backends: [] }))).toThrow(
       /held in Kvasir's database/,
     );
@@ -103,7 +104,7 @@ describe("the models Kvasir holds", () => {
       await post(url, "/v1/backends/test", { ...base, key: "sk-bad", models: ["qwen"] })
     ).json();
     expect(wrong.models[0].error.kind).toBe("key_refused");
-    expect(k.backends.list).toHaveLength(0);
+    expect(k.backends.list.filter((b) => !b.config.builtin)).toHaveLength(0);
     expect((await post(url, "/v1/backends/test", { ...base, models: ["qwen"] }, reader)).status).toBe(403);
   });
 
@@ -115,7 +116,7 @@ describe("the models Kvasir holds", () => {
     expect(silent.status).toBe(422);
     const why = await silent.json();
     expect(why.error.models.find((m: { id: string }) => m.id === "gone").answered).toBe(false);
-    expect(k.backends.list).toHaveLength(0);
+    expect(k.backends.list.filter((b) => !b.config.builtin)).toHaveLength(0);
 
     const added = await post(url, "/v1/backends", {
       ...base,
@@ -158,9 +159,9 @@ describe("the models Kvasir holds", () => {
         })
       ).status,
     ).toBe(201);
-    expect(second.k.backends.list).toHaveLength(0);
+    expect(second.k.backends.list.filter((b) => !b.config.builtin)).toHaveLength(0);
     second.k.held.sync();
-    expect(second.k.backends.list.map((b) => b.config.id)).toEqual(["card"]);
+    expect(second.k.backends.list.filter((b) => !b.config.builtin).map((b) => b.config.id)).toEqual(["card"]);
 
     const mapped = await fetch(`${first.url}/v1/purposes/assistant.title/policy`, {
       method: "PUT",
@@ -174,7 +175,7 @@ describe("the models Kvasir holds", () => {
     expect(first.k.policy.row("assistant.title")).toBeUndefined();
     expect(first.k.credentials.has("card")).toBe(false);
     second.k.held.sync();
-    expect(second.k.backends.list).toHaveLength(0);
+    expect(second.k.backends.list.filter((b) => !b.config.builtin)).toHaveLength(0);
     expect((await fetch(`${first.url}/v1/backends/card`, { method: "DELETE", headers: admin })).status).toBe(
       404,
     );

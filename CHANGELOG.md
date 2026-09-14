@@ -4,11 +4,17 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- ChatGPT through a person's own subscription. A person signs in with a device code (`POST /v1/subscriptions/chatgpt/sign-in`, then `GET /v1/subscriptions` until it is signed in), chooses the model their streams use (`PUT /v1/subscriptions/chatgpt`) and signs out (`DELETE /v1/subscriptions/chatgpt`). The credential is sealed under that person and refreshed before it expires. Where nobody signs in, the subscription signed in is the install's, and `kvasir subscriptions sign-in` signs it in from the command line. Kvasir's own `chatgpt` backend streams through pi-ai's OpenAI Codex adapter with the token of whoever streams. A purpose an admin moves to it goes to that person's subscription, runs on the local default for someone with none signed in, needs the written reason when it carries rows, and never carries identifiers.
+- An app's key calling for a person names them in `x-kvasir-person` with the person's own token, which Kvasir verifies as it would the person's own call. That person's subscription is used and the ledger row is theirs; a token that does not verify is refused.
+
 ### Changed
 
 - Kvasir holds its models in its own database. An admin tries a server's models (`POST /v1/backends/test`, `kvasir models test`), adds a backend (`POST /v1/backends`, `kvasir models add`), which is held only once every one of its models answered one short request, and removes one (`DELETE /v1/backends/{id}`, `kvasir models remove`), which lets go of its key and of the policy rows that named it. A local backend added while Kvasir runs is warmed and admitted there, and one added from the command line is followed within seconds. A backend's key is sealed under the backend's own id. `GET /v1/backends` shows an admin each backend's address and who added it, and everyone each model's window and admission.
 - `kvasir.json` no longer takes `backends` or `oauth`, and refuses a file that still names them: a fresh Kvasir starts with no model. `kvasir keys list` and `kvasir keys revoke` join `kvasir keys mint`.
 - Kvasir's version is read from its package; the constant said 1.0.0-alpha.2.
+- A purpose the policy table maps elsewhere moves a call to where the table sends it, whatever model the caller named, and the grant says so. A caller naming a model on another backend was refused.
 
 ### Removed
 

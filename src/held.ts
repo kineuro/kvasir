@@ -287,7 +287,11 @@ export class Held {
     const rows = this.rows();
     const added = rows.filter((r) => !this.backends.get(r.config.id)).map((r) => this.serve(r.config));
     const kept = new Set(rows.map((r) => r.config.id));
-    const removed = this.backends.list.map((b) => b.config.id).filter((id) => !kept.has(id));
+    // Kvasir's own backends are never stored, so never let go for being absent from the rows
+    const removed = this.backends.list
+      .filter((b) => !b.config.builtin)
+      .map((b) => b.config.id)
+      .filter((id) => !kept.has(id));
     for (const id of removed) this.backends.remove(id);
     for (const b of added) this.onAdded(b);
     return { added, removed };
@@ -377,6 +381,7 @@ export class Held {
 
   /** A backend let go: its row, its key and the policy rows naming it go; its streams already running finish. */
   remove(id: string): boolean {
+    if (this.backends.get(id)?.config.builtin) return false;
     const had = this.store.db.prepare("DELETE FROM backend WHERE id = ?").run(id).changes > 0;
     const served = this.backends.remove(id);
     if (!had && !served) return false;

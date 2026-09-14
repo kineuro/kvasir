@@ -116,6 +116,8 @@ function decide(
   text: string,
   policy: Policy,
   backends: Backends,
+  /** Whose stream this is: a person's, the system's where nobody signs in, or the app's own (record 23). */
+  subject: string,
 ): Decision {
   let granted: Grant | null = null;
   let purpose: string | null = null;
@@ -130,7 +132,7 @@ function decide(
           { layer: "policy", fact: "the grant is unknown or expired", relaxation: "ask for a grant again" },
         ]);
       if (bumped && granted.locality === "remote") {
-        granted = policy.grant(granted.purpose, {}, { bumped, keyClass: who.key?.maxClass });
+        granted = policy.grant(granted.purpose, {}, { bumped, keyClass: who.key?.maxClass, subject });
       }
     } else if (purposeHeader || (who.kind === "key" && (who.key?.purposes.length ?? 0) > 0)) {
       purpose = purposeHeader || (who.key?.purposes[0] ?? "");
@@ -139,7 +141,7 @@ function decide(
           { layer: "policy", fact: `the key's purposes do not include ${purpose}` },
         ]);
       }
-      granted = policy.grant(purpose, {}, { pin: model, bumped, keyClass: who.key?.maxClass });
+      granted = policy.grant(purpose, {}, { pin: model, bumped, keyClass: who.key?.maxClass, subject });
     } else if (named.backend.config.locality !== "local") {
       throw new PolicyRefused(403, [
         {
@@ -169,6 +171,7 @@ export async function piMessages(
   who: Principal,
   ledger: Ledger,
   policy: Policy,
+  subject: string,
 ): Promise<void> {
   let body: { model?: string; context?: Context; options?: Record<string, unknown> };
   try {
@@ -188,11 +191,20 @@ export async function piMessages(
     json(res, 400, { error: { code: "bad_request", message: "context: pi's context, with its messages" } });
     return;
   }
-  const decision = decide(req, who, named, String(body.model), userText(body.context), policy, backends);
+  const decision = decide(
+    req,
+    who,
+    named,
+    String(body.model),
+    userText(body.context),
+    policy,
+    backends,
+    subject,
+  );
   if (!decision.ok) {
     const first = decision.refused.refusals[0];
     ledger.record(
-      row(who, named, {
+      row(subject, named, {
         outcome: "refused",
         refusal: { layer: first.layer, fact: first.fact },
         purpose: decision.purpose,
@@ -227,7 +239,7 @@ export async function piMessages(
     });
     res.end();
     ledger.record(
-      row(who, found, {
+      row(subject, found, {
         outcome: "refused",
         refusal,
         totalMs: Date.now() - started,
@@ -246,7 +258,7 @@ export async function piMessages(
       temperature: typeof o.temperature === "number" ? o.temperature : undefined,
       maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : undefined,
       signal: controller.signal,
-      subject: who.subject,
+      subject,
     })) {
       if (
         ttftMs === null &&
@@ -275,7 +287,7 @@ export async function piMessages(
   res.end();
   const totalMs = Date.now() - started;
   ledger.record(
-    row(who, found, {
+    row(subject, found, {
       ...(usage ?? {}),
       outcome,
       ttftMs,
@@ -335,12 +347,12 @@ function counts(
 }
 
 function row(
-  who: Principal,
+  subject: string,
   found: { backend: { config: { id: string } }; entry: { id: string } },
   over: Partial<Row>,
 ): Row {
   return {
-    subject: who.subject,
+    subject,
     purpose: null,
     model: found.entry.id,
     backend: found.backend.config.id,
@@ -383,6 +395,7 @@ export async function chatCompletions(
   who: Principal,
   ledger: Ledger,
   policy: Policy,
+  subject: string,
 ): Promise<void> {
   let body: {
     model?: string;
@@ -424,11 +437,11 @@ export async function chatCompletions(
       } as never);
     }
   }
-  const decision = decide(req, who, named, String(body.model), userText(context), policy, backends);
+  const decision = decide(req, who, named, String(body.model), userText(context), policy, backends, subject);
   if (!decision.ok) {
     const first = decision.refused.refusals[0];
     ledger.record(
-      row(who, named, {
+      row(subject, named, {
         outcome: "refused",
         refusal: { layer: first.layer, fact: first.fact },
         purpose: decision.purpose,
@@ -448,7 +461,7 @@ export async function chatCompletions(
   const { found, granted, purpose } = decision;
   const ledgerRow = (over: Partial<Row>) =>
     ledger.record(
-      row(who, found, { purpose: granted?.purpose ?? purpose, grantId: granted?.grant ?? null, ...over }),
+      row(subject, found, { purpose: granted?.purpose ?? purpose, grantId: granted?.grant ?? null, ...over }),
     );
   const id = `chatcmpl-${Date.now().toString(36)}`;
   const created = Math.floor(Date.now() / 1000);
@@ -494,7 +507,7 @@ export async function chatCompletions(
       temperature: body.temperature,
       maxTokens: body.max_tokens,
       signal: controller.signal,
-      subject: who.subject,
+      subject,
     })) {
       if (
         ttftMs === null &&
