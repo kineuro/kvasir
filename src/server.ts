@@ -59,7 +59,13 @@ export interface Kvasir {
 
 export function build(
   config: Config,
-  options: { subscriptionAuth?: () => SubscriptionAuth; local?: LocalOptions; runtime?: RunnerOptions } = {},
+  options: {
+    subscriptionAuth?: () => SubscriptionAuth;
+    local?: LocalOptions;
+    runtime?: RunnerOptions;
+    /** How long a stream may say nothing before a comment keeps it; the doors' 15 seconds when absent. */
+    keepAliveMs?: number;
+  } = {},
 ): Kvasir {
   const store = new Store(config.store);
   const backends = new Backends(config.admission);
@@ -171,6 +177,7 @@ export function build(
         admissions,
         lifecycle,
         admit,
+        keepAliveMs: options.keepAliveMs,
       });
     } catch (e) {
       if (!res.headersSent)
@@ -284,6 +291,7 @@ async function route(
     admissions: Admissions;
     lifecycle: Lifecycle;
     admit: Kvasir["admit"];
+    keepAliveMs?: number;
   },
 ): Promise<void> {
   const {
@@ -310,10 +318,12 @@ async function route(
     json(res, 200, { object: "list", data: models });
   } else if (path === "/v1/messages" && req.method === "POST") {
     const subject = await streamSubject(req, res, who, auth, config);
-    if (subject !== null) await piMessages(req, res, backends, who, ledger, policy, subject);
+    if (subject !== null)
+      await piMessages(req, res, backends, who, ledger, policy, subject, { keepAliveMs: k.keepAliveMs });
   } else if (path === "/v1/chat/completions" && req.method === "POST") {
     const subject = await streamSubject(req, res, who, auth, config);
-    if (subject !== null) await chatCompletions(req, res, backends, who, ledger, policy, subject);
+    if (subject !== null)
+      await chatCompletions(req, res, backends, who, ledger, policy, subject, { keepAliveMs: k.keepAliveMs });
   } else if (path === "/v1/keys" && req.method === "GET") {
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "the keys are an admin's" } });

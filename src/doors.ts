@@ -27,14 +27,54 @@ export async function readBody(req: IncomingMessage, limit = 32 << 20): Promise<
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function sse(res: ServerResponse): (event: unknown) => void {
+/** How long a stream may say nothing before Kvasir writes a comment on it. */
+export const KEEP_ALIVE_MS = 15_000;
+
+/**
+ * A comment on a stream that has said nothing for `everyMs`. A model reading a
+ * long prompt on the processor can be silent for minutes before its first
+ * token, and a caller's HTTP client ends a response that says nothing for long
+ * enough (Node's fetch after 300 seconds), so the turn failed as "terminated".
+ * A comment is no event to any reader of a stream. `touch` marks a write;
+ * `stop` ends it, as does the response closing.
+ */
+export function keepAlive(res: ServerResponse, everyMs: number): { touch: () => void; stop: () => void } {
+  let last = Date.now();
+  const timer = setInterval(
+    () => {
+      if (res.writableEnded || res.destroyed || Date.now() - last < everyMs) return;
+      res.write(": ping\n\n");
+      last = Date.now();
+    },
+    Math.max(20, Math.min(1_000, Math.floor(everyMs / 4))),
+  );
+  timer.unref();
+  const stop = () => clearInterval(timer);
+  res.on("close", stop);
+  return {
+    touch: () => {
+      last = Date.now();
+    },
+    stop,
+  };
+}
+
+function sse(
+  res: ServerResponse,
+  everyMs: number,
+): { send: (event: unknown) => void; alive: ReturnType<typeof keepAlive> } {
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     connection: "keep-alive",
   });
-  return (event) => {
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  const alive = keepAlive(res, everyMs);
+  return {
+    send: (event) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+      alive.touch();
+    },
+    alive,
   };
 }
 
@@ -172,6 +212,7 @@ export async function piMessages(
   ledger: Ledger,
   policy: Policy,
   subject: string,
+  opts: { keepAliveMs?: number } = {},
 ): Promise<void> {
   let body: { model?: string; context?: Context; options?: Record<string, unknown> };
   try {
@@ -224,11 +265,15 @@ export async function piMessages(
   const controller = new AbortController();
   req.on("close", () => controller.abort());
   const started = Date.now();
-  // the queue (§8.7): the headers go out now; a heartbeat keeps the socket while waiting
-  const send = sse(res);
+  // the queue (§8.7): the headers go out now; a heartbeat keeps the socket while waiting, and a
+  // comment keeps it while the model says nothing
+  const { send, alive } = sse(res, opts.keepAliveMs ?? KEEP_ALIVE_MS);
   let release: (() => void) | null = null;
   try {
-    release = await found.backend.admission.acquire(() => res.write(": queued\n\n"), controller.signal);
+    release = await found.backend.admission.acquire(() => {
+      res.write(": queued\n\n");
+      alive.touch();
+    }, controller.signal);
   } catch (e) {
     const refusal = e instanceof RefusedAdmission ? e.refusal : { layer: "health" as const, fact: "no slot" };
     send({
@@ -237,6 +282,7 @@ export async function piMessages(
       usage: emptyUsage(),
       errorMessage: `refused at the ${refusal.layer} layer: ${refusal.fact}`,
     });
+    alive.stop();
     res.end();
     ledger.record(
       row(subject, found, {
@@ -284,6 +330,7 @@ export async function piMessages(
   } finally {
     release();
   }
+  alive.stop();
   res.end();
   const totalMs = Date.now() - started;
   ledger.record(
@@ -396,6 +443,7 @@ export async function chatCompletions(
   ledger: Ledger,
   policy: Policy,
   subject: string,
+  opts: { keepAliveMs?: number } = {},
 ): Promise<void> {
   let body: {
     model?: string;
@@ -469,16 +517,25 @@ export async function chatCompletions(
   req.on("close", () => controller.abort());
   const started = Date.now();
   const stream = body.stream === true;
-  const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
+  // the queue (§8.7): a stream's headers go out now and a heartbeat keeps the socket while it waits,
+  // and a comment keeps it while the model says nothing
+  if (stream) res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  const alive = stream ? keepAlive(res, opts.keepAliveMs ?? KEEP_ALIVE_MS) : null;
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
     res.write(
       `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: found.entry.id, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`,
     );
-  // the queue (§8.7): a stream's headers go out now and a heartbeat keeps the socket while it waits
-  if (stream) res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    alive?.touch();
+  };
   let release: (() => void) | null = null;
   try {
     release = await found.backend.admission.acquire(
-      stream ? () => res.write(": queued\n\n") : undefined,
+      stream
+        ? () => {
+            res.write(": queued\n\n");
+            alive?.touch();
+          }
+        : undefined,
       controller.signal,
     );
   } catch (e) {
@@ -487,6 +544,7 @@ export async function chatCompletions(
     if (stream) {
       res.write(`data: ${JSON.stringify({ error: { message, type: "refused", code: "refused" } })}\n\n`);
       res.write("data: [DONE]\n\n");
+      alive?.stop();
       res.end();
     } else {
       json(res, 503, { error: { message, type: "refused", code: "refused", layer: refusal.layer } });
@@ -553,6 +611,7 @@ export async function chatCompletions(
   });
   if (stream) {
     res.write("data: [DONE]\n\n");
+    alive?.stop();
     res.end();
     return;
   }

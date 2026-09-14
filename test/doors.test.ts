@@ -125,12 +125,73 @@ async function fakeAnthropic(signature: string) {
   });
 }
 
+/**
+ * A fake OpenAI-completions runtime that says nothing for `silentMs` after its
+ * headers, as llama.cpp does on the processor while it reads a long prompt,
+ * then answers.
+ */
+async function slowOpenAI(silentMs: number) {
+  return serve((req, res, text) => {
+    const q = JSON.parse(text);
+    if (req.url !== "/v1/chat/completions" || !q.stream) {
+      res.writeHead(400);
+      res.end();
+      return;
+    }
+    const chunk = (delta: Record<string, unknown>, finish: string | null = null, usage?: unknown) => ({
+      id: "x",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: q.model,
+      choices: [{ index: 0, delta, finish_reason: finish }],
+      ...(usage ? { usage } : {}),
+    });
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    setTimeout(() => {
+      for (const e of [
+        chunk({ role: "assistant", content: "" }),
+        chunk({ content: "Read it." }),
+        chunk({}, "stop", { prompt_tokens: 5571, completion_tokens: 3, total_tokens: 5574 }),
+      ])
+        res.write(`data: ${JSON.stringify(e)}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }, silentMs);
+  });
+}
+
+/** A local backend on a slow runtime, one model that does not reason. */
+function slowBackend(url: string) {
+  return {
+    id: "slow",
+    kind: "openai-completions",
+    baseUrl: `${url}/v1`,
+    locality: "local",
+    concurrency: 8,
+    warmup: false,
+    models: [
+      {
+        id: "slow-model",
+        name: "Slow",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 32768,
+        maxTokens: 4096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ],
+  };
+}
+
 const closers: (() => Promise<void> | void)[] = [];
 afterAll(async () => {
   for (const c of closers) await c();
 });
 
-async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> {
+async function kvasir(
+  backends: unknown[],
+  options: Parameters<typeof build>[1] = {},
+): Promise<{ k: Kvasir; url: string }> {
   const dir = mkdtempSync(join(tmpdir(), "kvasir-"));
   const config = parse(
     JSON.stringify({
@@ -142,7 +203,7 @@ async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> 
       admission: { queue: 8, waitCapSeconds: 60, gate: false },
     }),
   );
-  const k = build(config);
+  const k = build(config, options);
   hold(k, backends);
   const url = await listen(k, "127.0.0.1:0");
   closers.push(() => k.close());
@@ -515,5 +576,92 @@ describe("the door", () => {
     expect(() => parse(JSON.stringify({ bind: "x", origin: "http://x", backends: [] }))).toThrow(
       /held in Kvasir's database/,
     );
+  });
+
+  it("keeps a stream observable while the model says nothing, and a pi client reads it as before", async () => {
+    const rt = await slowOpenAI(900);
+    closers.push(() => rt.server.close());
+    const { url } = await kvasir([slowBackend(rt.url)], { keepAliveMs: 100 });
+    // on the wire: comments while the runtime is silent, then the events, and nothing after the last
+    const r = await fetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: { authorization: "Bearer a-kvasir-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "slow-model",
+        context: { messages: [{ role: "user", content: "Read this long prompt", timestamp: 1 }] },
+      }),
+    });
+    const blocks = (await r.text()).split("\n\n").filter(Boolean);
+    expect(blocks.filter((b) => b === ": ping").length).toBeGreaterThanOrEqual(3);
+    expect(blocks.at(-1)).toMatch(/^data: \{"type":"done"/);
+    // as the assistant streams: the same events, the comments unseen
+    const events: string[] = [];
+    let text = "";
+    for await (const ev of piStream(
+      piModel(url, "slow-model"),
+      { messages: [{ role: "user", content: "Again", timestamp: 1 }] },
+      { apiKey: "a-kvasir-token" },
+    )) {
+      events.push(ev.type);
+      if (ev.type === "text_delta") text += ev.delta;
+    }
+    expect(events[0]).toBe("start");
+    expect(events.at(-1)).toBe("done");
+    expect(text).toBe("Read it.");
+  });
+
+  it("keeps the OpenAI-shaped stream the same way, and ends it with [DONE]", async () => {
+    const rt = await slowOpenAI(600);
+    closers.push(() => rt.server.close());
+    const { url } = await kvasir([slowBackend(rt.url)], { keepAliveMs: 100 });
+    const r = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: "Bearer a-kvasir-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "slow-model",
+        stream: true,
+        messages: [{ role: "user", content: "Hi" }],
+      }),
+    });
+    const raw = await r.text();
+    const blocks = raw.split("\n\n").filter(Boolean);
+    expect(blocks.filter((b) => b === ": ping").length).toBeGreaterThanOrEqual(2);
+    expect(blocks.at(-1)).toBe("data: [DONE]");
+    expect(raw).toContain("Read it.");
+  });
+
+  it("writes no comment on a stream that keeps talking", async () => {
+    const rt = await fakeOpenAI([]);
+    closers.push(() => rt.server.close());
+    const { url } = await kvasir([
+      {
+        id: "card",
+        kind: "openai-completions",
+        baseUrl: `${rt.url}/v1`,
+        locality: "local",
+        concurrency: 8,
+        warmup: false,
+        models: [
+          {
+            id: "qwen38-27b",
+            name: "Qwen",
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 32768,
+            maxTokens: 4096,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
+      },
+    ]);
+    const r = await fetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: { authorization: "Bearer a-kvasir-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "qwen38-27b",
+        context: { messages: [{ role: "user", content: "Hi", timestamp: 1 }] },
+      }),
+    });
+    expect(await r.text()).not.toContain(": ping");
   });
 });
