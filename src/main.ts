@@ -180,7 +180,7 @@ if (args[0] === "subscriptions" && ["list", "sign-in", "sign-out"].includes(args
 if (args[0] === "local") {
   const verb = args[1] ?? "";
   const usage =
-    "kvasir local list | location [--set PATH] | lookup --repo OWNER/NAME [--revision V] [--include GLOB]... | download --repo OWNER/NAME [--revision V] [--include GLOB]... | pause|resume|remove --id N | start --id N [--file PATH] [--wait SECONDS] | stop --id N | token --file FILE | token --clear";
+    "kvasir local list | location [--set PATH] | lookup --repo OWNER/NAME [--revision V] [--include GLOB]... | download --repo OWNER/NAME [--revision V] [--include GLOB]... | pause|resume|remove --id N | start --id N [--file PATH] [--context TOKENS] [--wait SECONDS] | stop --id N | token --file FILE | token --clear";
   const known = [
     "list",
     "location",
@@ -228,7 +228,7 @@ if (args[0] === "local") {
         );
         if (m.run)
           console.log(
-            `    ${m.run.state} as ${m.run.model}${m.run.context ? `, ${m.run.context} tokens of context` : ""}${m.run.error ? `: ${m.run.error}` : ""}`,
+            `    ${m.run.state} as ${m.run.model}${m.run.context ? `, ${m.run.context} tokens of context` : ""}${m.run.error ? `: ${m.run.error}` : ""}${m.run.note ? ` (${m.run.note})` : ""}`,
           );
         else if (m.startable) console.log(`    starts with kvasir local start --id ${m.id}`);
         for (const c of m.serve) console.log(`    ${c.runtime}: ${c.command}`);
@@ -298,7 +298,13 @@ if (args[0] === "local") {
         const row = await runner.stop(id);
         console.log(`model ${id} is ${row.run?.state ?? "not started"}`);
       } else {
-        let row = await runner.start(id, by, flag("--file"));
+        const context = flag("--context");
+        let row = await runner.start(
+          id,
+          by,
+          flag("--file"),
+          context === undefined ? undefined : Number(context),
+        );
         const until = Date.now() + Number(flag("--wait") ?? 600) * 1000;
         while (row.run?.state === "starting" && Date.now() < until) {
           await new Promise((r) => setTimeout(r, 2_000));
