@@ -106,6 +106,21 @@ export class Auth {
     }
   }
 
+  /**
+   * The person an app streams for (record 23): that person's own token, sent
+   * beside the app's minted key and verified as the person's own call would be,
+   * used only to find whose subscription a stream may use. A machine, a key, or
+   * a token that does not verify is refused.
+   */
+  async person(token: string): Promise<Principal> {
+    if (this.config.mode === "off") throw new Refused(401, "nobody signs in here");
+    const named = this.config.tokens?.[token];
+    const p = named ? this.named(named) : this.config.mode === "oidc" ? await this.verify(token) : undefined;
+    if (p?.kind !== "person")
+      throw new Refused(401, "the person's token is not one of a person this gateway trusts");
+    return p;
+  }
+
   /** The principal a configured token names, "principal@node:role,role". */
   private named(entry: string): Principal {
     const [principal, list] = entry.split(":");

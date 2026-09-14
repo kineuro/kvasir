@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { read } from "./config.js";
 import { described, HeldRefused, type Tried, tryBackend } from "./held.js";
 import { build, listen, ready, VERSION } from "./server.js";
+import { SYSTEM } from "./subscriptions.js";
 import { probeRuntime } from "./suite.js";
 
 const args = process.argv.slice(2);
@@ -112,6 +113,52 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
     }
   } catch (e) {
     if (e instanceof HeldRefused && e.models.length > 0) sayTried({ listed: null, models: e.models });
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
+  }
+  await k.close();
+  process.exit(process.exitCode ?? 0);
+}
+
+// `kvasir subscriptions list | sign-in | sign-out [--subject S]` (record 23): a
+// ChatGPT subscription from the command line, the install's unless a subject
+// is named, for the setup of an install where nobody signs in. The sign-in
+// shows a code and a link, and waits until the person approves.
+if (args[0] === "subscriptions" && ["list", "sign-in", "sign-out"].includes(args[1] ?? "")) {
+  const k = build(config);
+  const subject = flag("--subject") ?? SYSTEM;
+  try {
+    if (args[1] === "list") {
+      for (const s of k.subscriptions.list()) {
+        console.log(
+          `${s.subject}  ChatGPT  ${s.model ?? "no model"}  since ${new Date(s.since).toISOString()}${s.refreshedAt ? `  refreshed ${new Date(s.refreshedAt).toISOString()}` : ""}`,
+        );
+      }
+    } else if (args[1] === "sign-out") {
+      if (k.subscriptions.signOut(subject)) console.log(`signed ${subject} out of ChatGPT`);
+      else {
+        console.error(`kvasir: no ChatGPT subscription is signed in for ${subject}`);
+        process.exitCode = 1;
+      }
+    } else {
+      const waiting = await k.subscriptions.signIn(subject);
+      console.log(`Open ${waiting.verificationUri} and enter the code ${waiting.userCode}`);
+      console.log(`The code works until ${new Date(waiting.expiresAt).toISOString()}.`);
+      for (;;) {
+        const s = k.subscriptions.status(subject, subject === SYSTEM ? "system" : "person");
+        if (s.state === "signed_in") {
+          console.log(`Signed in to ChatGPT; streams use ${s.model}.`);
+          break;
+        }
+        if (s.state === "failed") {
+          console.error(`kvasir: the sign-in did not finish: ${s.error}`);
+          process.exitCode = 1;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+    }
+  } catch (e) {
     console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
     process.exitCode = 1;
   }

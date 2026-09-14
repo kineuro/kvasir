@@ -7,6 +7,7 @@
 
 import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { stream as openaiStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { Admission } from "./admission.js";
 import type { BackendConfig, ModelEntry } from "./config.js";
@@ -29,6 +30,8 @@ export class Backend {
   readonly config: BackendConfig;
   /** The credential store's answer for this backend and the person streaming, at use, never kept (§8.4). */
   credential: ((subject?: string) => Promise<string | null> | string | null) | null = null;
+  /** pi-ai's own model for an entry, where it knows the model better than an entry does: ChatGPT's carry their reasoning levels and flags. */
+  native: ((entry: ModelEntry) => Model<"openai-codex-responses"> | undefined) | null = null;
   readonly health: Health;
   readonly admission: Admission;
   /** The models of this backend that passed the suite for the current runtime (§8.6); every model of a remote backend. */
@@ -63,7 +66,9 @@ export class Backend {
   }
 
   /** The pi model of one entry, as the backend serves it. */
-  model(entry: ModelEntry): Model<"openai-completions" | "anthropic-messages"> {
+  model(entry: ModelEntry): Model<"openai-completions" | "anthropic-messages" | "openai-codex-responses"> {
+    const native = this.native?.(entry);
+    if (native) return native;
     const compat = this.compat();
     return {
       ...(compat ? { compat } : {}),
@@ -77,7 +82,7 @@ export class Backend {
       cost: entry.cost,
       contextWindow: entry.contextWindow,
       maxTokens: entry.maxTokens,
-    } as Model<"openai-completions" | "anthropic-messages">;
+    } as Model<"openai-completions" | "anthropic-messages" | "openai-codex-responses">;
   }
 
   /**
@@ -93,7 +98,7 @@ export class Backend {
       maxTokens?: number;
       signal?: AbortSignal;
       toolChoice?: unknown;
-      /** The person streaming, so a brought key or a grant of theirs is used before the organisation's (C5). */
+      /** The person streaming, whose own subscription a ChatGPT stream uses (record 23). */
       subject?: string;
     },
   ): AsyncGenerator<AssistantMessageEvent> {
@@ -112,7 +117,9 @@ export class Backend {
       const events =
         this.config.kind === "anthropic-messages"
           ? anthropicStream(model as Model<"anthropic-messages">, context, common)
-          : openaiStream(model as Model<"openai-completions">, context, common);
+          : this.config.kind === "openai-codex-responses"
+            ? codexStream(model as Model<"openai-codex-responses">, context, common)
+            : openaiStream(model as Model<"openai-completions">, context, common);
       // reasoning a model left inline leaves as thinking, never as the answer (the chat, slice 9)
       const mode = this.config.inlineReasoning ?? "markers";
       for await (const ev of mode === "off" ? events : splitInline(events, mode)) {
@@ -200,8 +207,11 @@ export class Backends {
     return new Backend(config, this.queue, this.waitCapMs);
   }
 
+  /** A backend served: one an admin added goes before Kvasir's own, so the order an admin added them in stays first. */
   add(backend: Backend): void {
-    this.list.push(backend);
+    const own = this.list.findIndex((b) => b.config.builtin);
+    if (backend.config.builtin || own < 0) this.list.push(backend);
+    else this.list.splice(own, 0, backend);
   }
 
   /** A backend let go: its warm-up ends, and the streams already running finish. */
@@ -217,8 +227,13 @@ export class Backends {
     return this.list.find((b) => b.config.id === id);
   }
 
-  /** Whether a model is listed: a remote one always, a local one once admitted, unless the gate is off. */
+  /**
+   * Whether a model is listed: a remote one always, a local one once admitted, unless the gate is off.
+   * Kvasir's own ChatGPT models never are: a stream reaches them only where the policy sends a purpose
+   * to the subscription of the person streaming (record 23).
+   */
   listed(backend: Backend, entry: ModelEntry): boolean {
+    if (backend.config.builtin) return false;
     return !this.gate || backend.config.locality === "remote" || backend.admitted.has(entry.id);
   }
 
