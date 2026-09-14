@@ -7,6 +7,7 @@
 import { readFileSync } from "node:fs";
 import { read } from "./config.js";
 import { described, HeldRefused, type Tried, tryBackend } from "./held.js";
+import { readable } from "./local.js";
 import { build, listen, ready, VERSION } from "./server.js";
 import { SYSTEM } from "./subscriptions.js";
 import { probeRuntime } from "./suite.js";
@@ -157,6 +158,123 @@ if (args[0] === "subscriptions" && ["list", "sign-in", "sign-out"].includes(args
         }
         await new Promise((r) => setTimeout(r, 2_000));
       }
+    }
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
+  }
+  await k.close();
+  process.exit(process.exitCode ?? 0);
+}
+
+// `kvasir local list | location | lookup | download | pause | resume | remove | token`
+// (record 23): local models on the same database. A download, or a resume, is
+// left to a Kvasir serving the database when one takes it within seconds, and
+// is otherwise downloaded here until it is done. Stopped with Ctrl-C, it carries
+// on when a Kvasir starts on the database, or with `kvasir local resume`.
+if (args[0] === "local") {
+  const verb = args[1] ?? "";
+  const usage =
+    "kvasir local list | location [--set PATH] | lookup --repo OWNER/NAME [--revision V] [--include GLOB]... | download --repo OWNER/NAME [--revision V] [--include GLOB]... | pause|resume|remove --id N | token --file FILE | token --clear";
+  const known = ["list", "location", "lookup", "download", "pause", "resume", "remove", "token"];
+  if (
+    !known.includes(verb) ||
+    ((verb === "lookup" || verb === "download") && !flag("--repo")) ||
+    (verb === "token" && !flag("--file") && !args.includes("--clear"))
+  ) {
+    console.error(usage);
+    process.exit(2);
+  }
+  const idOf = (): number => {
+    const id = Number(flag("--id"));
+    if (!Number.isInteger(id) || id < 1) {
+      console.error(`kvasir local ${verb} --id N`);
+      process.exit(2);
+    }
+    return id;
+  };
+  const asked = { repo: flag("--repo"), revision: flag("--revision"), include: flags("--include") };
+  const k = build(config);
+  try {
+    if (verb === "list") {
+      const s = k.local.status();
+      console.log(
+        `new downloads go to ${s.location}${s.free_bytes === null ? "" : `, with ${readable(s.free_bytes)} free`}; ${s.token ? "a Hugging Face token is set" : "no Hugging Face token is set"}`,
+      );
+      for (const m of s.models) {
+        console.log(
+          `${m.id}  ${m.repo}@${m.revision}  ${m.commit.slice(0, 12)}  ${m.state}  ${readable(m.bytes_done)} of ${readable(m.bytes_total)} in ${m.files} file(s)  ${m.path}${m.error ? `  ${m.error}` : ""}`,
+        );
+        for (const c of m.serve) console.log(`    ${c.runtime}: ${c.command}`);
+      }
+    } else if (verb === "location") {
+      const set = flag("--set");
+      if (set === undefined) console.log(k.local.location());
+      else
+        console.log(
+          `new downloads go to ${k.local.setLocation(set, by)}; the models downloaded before stay where they are`,
+        );
+    } else if (verb === "lookup") {
+      const found = await k.local.lookup(asked);
+      console.log(`${found.repo} at ${found.revision} is commit ${found.commit}`);
+      for (const f of found.files)
+        console.log(`  ${f.path}  ${readable(f.size)}${f.sha256 ? "" : "  (the hub lists no sha256)"}`);
+      console.log(`${found.files.length} file(s), ${readable(found.bytes_total)}`);
+    } else if (verb === "download" || verb === "resume") {
+      const row = verb === "download" ? await k.local.add(asked, by) : k.local.resume(idOf());
+      console.log(
+        `model ${row.id}: ${row.repo} at ${row.commit.slice(0, 12)}, ${row.files} file(s) and ${readable(row.bytes_total)}, into ${row.path}`,
+      );
+      let stopping = false;
+      process.once("SIGINT", () => {
+        stopping = true;
+        void k.local.stop();
+      });
+      const shown = setInterval(() => {
+        const now = k.local.get(row.id);
+        if (now?.state === "downloading")
+          console.log(`model ${row.id}: ${readable(now.bytes_done)} of ${readable(now.bytes_total)}`);
+      }, 10_000);
+      const how = await k.local.follow(row.id, {
+        here: () => console.log(`no Kvasir serving this database took model ${row.id}, so it downloads here`),
+      });
+      clearInterval(shown);
+      const after = k.local.get(row.id);
+      if (stopping) {
+        console.log(
+          `model ${row.id} stopped with what it has; it carries on when a Kvasir starts on this database, or with kvasir local resume --id ${row.id}`,
+        );
+        process.exitCode = 130;
+      } else if (how === "waiting")
+        console.log(`a Kvasir on this database is downloading another model; model ${row.id} waits its turn`);
+      else if (after?.state === "downloading")
+        console.log(
+          `a Kvasir serving this database is downloading model ${row.id}; kvasir local list shows how far it is`,
+        );
+      else if (after?.state === "done") {
+        console.log(`model ${row.id} is downloaded into ${after.path}`);
+        for (const c of after.serve) console.log(`  ${c.runtime}: ${c.command}`);
+      } else if (after?.state === "failed") {
+        console.error(`kvasir: model ${row.id} failed: ${after.error}`);
+        process.exitCode = 1;
+      } else console.log(`model ${row.id} is ${after?.state ?? "removed"}`);
+    } else if (verb === "pause") {
+      const row = k.local.pause(idOf());
+      console.log(`model ${row.id} is ${row.state}`);
+    } else if (verb === "remove") {
+      const id = idOf();
+      if (await k.local.remove(id)) console.log(`removed model ${id} and its files`);
+      else {
+        console.error(`kvasir: no local model ${id}`);
+        process.exitCode = 1;
+      }
+    } else if (args.includes("--clear")) {
+      console.log(
+        k.local.clearToken() ? "the Hugging Face token is cleared" : "no Hugging Face token was set",
+      );
+    } else {
+      k.local.setToken(readFileSync(flag("--file") as string, "utf8"));
+      console.log("the Hugging Face token is sealed; Kvasir never shows it");
     }
   } catch (e) {
     console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
@@ -379,6 +497,10 @@ for (const b of k.backends.list) {
   if (b.health.warming) void b.keepWarm(undefined, (line) => console.log(`  ${line}`));
 }
 k.held.watch();
+// local model downloads left queued or downloading when Kvasir last closed carry on, one model at a time (record 23)
+k.local.say = (line) => console.log(`  ${line}`);
+const carrying = k.local.start();
+if (carrying > 0) console.log(`  ${carrying} local model download(s) to carry on`);
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     k.close().then(() => process.exit(0));
