@@ -479,13 +479,15 @@ k.held.onAdded = (backend) => void ready(k, backend);
 // the admitted sets from the records, against the runtime each backend reports now (§8.6)
 await k.admissions.load(k.backends, (b) => probeRuntime(b));
 const address = await listen(k, config.bind);
-const held = k.backends.list.length;
+// the models an admin added; Kvasir's own ChatGPT is not one of them
+const added = k.backends.list.filter((b) => !b.config.builtin);
+const held = added.length;
 console.log(
   `kvasir ${VERSION} serving ${address} as ${config.origin}, ${held === 0 ? "with no model yet: an admin adds one from the desk or with kvasir models add" : `${held} backend(s), warming`}`,
 );
 // long-lived and warmed, never on demand (§8.5): one try at start, then again until a first token
 await Promise.all(k.backends.list.map((b) => b.warmup()));
-for (const b of k.backends.list) {
+for (const b of added) {
   const admitted =
     b.config.locality === "remote"
       ? ""
