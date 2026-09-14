@@ -302,10 +302,11 @@ export class Policy {
       if (pinned && !subscribed) {
         entry = pinned;
         because.push(`pinned to ${opts.pin} by the caller, recorded`);
-      } else if (!pinned && elsewhere && (row || subscribed)) {
-        // an admin's mapping moves the call, whatever model the caller named (record 23)
+      } else if (!pinned && (row || subscribed)) {
+        // an admin's mapping moves the call, whatever model the caller named, even one Kvasir holds nowhere: an app
+        // names some model where a subscription serves the purpose, and Kvasir lists none of its models (record 23)
         because.push(
-          `${opts.pin} was named by the caller, and the policy table sends ${purposeId} to ${chosen.config.id}, so it runs on ${entry?.id ?? chosen.config.id}`,
+          `${opts.pin} was named by the caller${elsewhere ? "" : ", and Kvasir holds no model of that name"}, and the policy table sends ${purposeId} to ${chosen.config.id}, so it runs on ${entry?.id ?? chosen.config.id}`,
         );
       } else if (!pinned) {
         if (elsewhere) {

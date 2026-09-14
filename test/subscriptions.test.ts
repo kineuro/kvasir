@@ -264,6 +264,18 @@ describe("ChatGPT in the policy", () => {
       model: "gpt-5.4-mini",
       locality: "remote",
     });
+    // even a model Kvasir holds nowhere, which an app names where only a subscription serves the purpose
+    const nowhere = await grant("anna-token", { purpose: "assistant.title", pin: "chatgpt" });
+    expect(nowhere).toMatchObject({ backend: "chatgpt", model: "gpt-5.4-mini" });
+    expect(nowhere.chose_because.join(" ")).toContain("Kvasir holds no model of that name");
+    // with no row for the purpose, a model held nowhere is still refused
+    const unmapped = await fetch(`${url}/v1/grants`, {
+      method: "POST",
+      headers: as("anna-token"),
+      body: JSON.stringify({ purpose: "assistant.ask-help", pin: "chatgpt" }),
+    });
+    expect(unmapped.status).toBe(403);
+    expect(JSON.stringify(await unmapped.json())).toContain("no model named chatgpt");
     const fallback = await grant("bo-token", { purpose: "assistant.title" });
     expect(fallback).toMatchObject({ backend: "card", model: "qwen" });
     expect(fallback.chose_because.join(" ")).toContain("no ChatGPT subscription is signed in");
