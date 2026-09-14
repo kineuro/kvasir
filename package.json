@@ -1,6 +1,6 @@
 {
   "name": "kvasir",
-  "version": "1.0.0-alpha.4",
+  "version": "1.0.0-alpha.5",
   "private": true,
   "description": "The model gateway of NILS: one door for every model, pi-messages in and out, the catalog, the grants and the ledger",
   "license": "AGPL-3.0-only",
