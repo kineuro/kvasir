@@ -349,11 +349,11 @@ async function route(
       })),
     });
   } else if (path === "/v1/backends/test" && req.method === "POST") {
-    // record 23: each model asked one short question, and nothing kept
+    // record 23: each model asked one short question, and nothing kept; with none named, only what the server lists
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "trying a backend is an admin's" } });
     try {
-      const d = described(JSON.parse((await readBody(req)) || "{}"));
+      const d = described(JSON.parse((await readBody(req)) || "{}"), { modelsOptional: true });
       json(res, 200, await tryBackend(d.config, d.key));
     } catch (e) {
       heldError(res, e);

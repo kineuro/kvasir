@@ -54,8 +54,14 @@ export function idFrom(model: string): string {
   );
 }
 
-/** An admin's description of a backend made whole: every field checked, defaults filled, the key apart. */
-export function described(input: unknown): { config: BackendConfig; key: string | null; named: boolean } {
+/**
+ * An admin's description of a backend made whole: every field checked, defaults filled, the key apart.
+ * A description for listing a server's models, before any is chosen, may name none.
+ */
+export function described(
+  input: unknown,
+  opts: { modelsOptional?: boolean } = {},
+): { config: BackendConfig; key: string | null; named: boolean } {
   const o = (input ?? {}) as Record<string, unknown>;
   const bad = (message: string) => new HeldRefused(400, message);
   const kind = String(o.kind ?? "openai-completions") as BackendKind;
@@ -68,10 +74,10 @@ export function described(input: unknown): { config: BackendConfig; key: string 
   const locality = o.locality;
   if (locality !== "local" && locality !== "remote")
     throw bad("locality: local, for a server in your own systems, or remote, for a provider");
-  if (!Array.isArray(o.models) || o.models.length === 0)
+  if ((!Array.isArray(o.models) || o.models.length === 0) && !opts.modelsOptional)
     throw bad("models: at least one model the server serves");
   const models: ModelEntry[] = [];
-  for (const raw of o.models) {
+  for (const raw of Array.isArray(o.models) ? o.models : []) {
     const m = (typeof raw === "string" ? { id: raw } : (raw ?? {})) as Record<string, unknown>;
     const id = typeof m.id === "string" ? m.id.trim() : "";
     if (!id) throw bad("models: each model has the id the server knows it by");
@@ -95,7 +101,7 @@ export function described(input: unknown): { config: BackendConfig; key: string 
     });
   }
   const named = typeof o.id === "string" && o.id.trim() !== "";
-  const id = named ? String(o.id).trim() : idFrom(models[0].id);
+  const id = named ? String(o.id).trim() : models.length > 0 ? idFrom(models[0].id) : "listing";
   if (!ID.test(id)) throw bad("id: lowercase letters, digits and dashes, at most forty");
   const concurrency = o.concurrency === undefined ? 8 : Number(o.concurrency);
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 256)

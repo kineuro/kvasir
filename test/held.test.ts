@@ -96,6 +96,9 @@ describe("the models Kvasir holds", () => {
       ["gone", false],
     ]);
     expect(tried.models[1].error.kind).toBe("no_model");
+    // with no model named, only what the server lists: what a person picks from
+    const listing = await (await post(url, "/v1/backends/test", { ...base, key: "sk-good" })).json();
+    expect(listing).toEqual({ listed: ["qwen"], models: [] });
     const wrong = await (
       await post(url, "/v1/backends/test", { ...base, key: "sk-bad", models: ["qwen"] })
     ).json();

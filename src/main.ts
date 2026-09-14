@@ -73,7 +73,8 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
     } else {
       const keyFile = flag("--key-file");
       const models = flags("--model");
-      if (models.length === 0 || !flag("--url")) {
+      // a test with no model lists what the server serves; an add names at least one
+      if (!flag("--url") || (args[1] === "add" && models.length === 0)) {
         console.error(usage);
         process.exit(2);
       }
@@ -97,7 +98,7 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
         })),
       };
       if (args[1] === "test") {
-        const d = described(input);
+        const d = described(input, { modelsOptional: true });
         const tried = await tryBackend(d.config, d.key);
         sayTried(tried);
         if (tried.models.some((m) => !m.answered)) process.exitCode = 1;
