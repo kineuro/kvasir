@@ -242,7 +242,7 @@ export async function piMessages(
   let outcome: Row["outcome"] = "completed";
   let usage: Partial<Row> | null = null;
   try {
-    for await (const ev of found.backend.stream(found.entry, body.context, {
+    for await (const ev of found.backend.stream(found.entry, asBackendTurns(body.context, found), {
       temperature: typeof o.temperature === "number" ? o.temperature : undefined,
       maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : undefined,
       signal: controller.signal,
@@ -285,6 +285,27 @@ export async function piMessages(
       grantId: granted?.grant ?? null,
     }),
   );
+}
+
+/**
+ * A context's earlier turns as this backend's own (the chat, slice 9). A client
+ * records a turn under Kvasir's catalog id and its own provider, so pi would take
+ * it for another model's turn and paste its thinking into the answer's text. A
+ * turn this model wrote is handed back under the backend's identity, so its
+ * thinking replays as thinking, signature and all; thinking another model wrote
+ * is left out.
+ */
+export function asBackendTurns(context: Context, found: Found): Context {
+  const model = found.backend.model(found.entry);
+  const same = new Set([found.entry.id, model.id]);
+  return {
+    ...context,
+    messages: context.messages.map((m) => {
+      if (m.role !== "assistant") return m;
+      if (same.has(m.model)) return { ...m, api: model.api, provider: model.provider, model: model.id };
+      return { ...m, content: m.content.filter((c) => c.type !== "thinking") };
+    }),
+  };
 }
 
 /** The person's own words in a context: the last user message and the system prompt, for the identifier-shape rule. */

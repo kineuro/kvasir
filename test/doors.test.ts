@@ -335,6 +335,183 @@ describe("the door", () => {
     expect(streamed.trim().endsWith("data: [DONE]")).toBe(true);
   });
 
+  it("moves reasoning a model left inline into thinking, through both doors, unless the backend says off", async () => {
+    const rt = await serve((_req, res, text) => {
+      const q = JSON.parse(text);
+      const chunk = (delta: Record<string, unknown>, finish: string | null = null, usage?: unknown) => ({
+        id: "x",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: q.model,
+        choices: [{ index: 0, delta, finish_reason: finish }],
+        ...(usage ? { usage } : {}),
+      });
+      sse(res, [
+        chunk({ role: "assistant", content: "" }),
+        chunk({ content: "<think>\n" }),
+        chunk({ content: "Counting the sessions." }),
+        chunk({ content: "</think>\n\nThere are " }),
+        chunk({ content: "12." }),
+        chunk({}, "stop", { prompt_tokens: 5, completion_tokens: 6, total_tokens: 11 }),
+        "[DONE]",
+      ]);
+    });
+    closers.push(() => rt.server.close());
+    const model = (id: string) => ({
+      id,
+      name: id,
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 32768,
+      maxTokens: 4096,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    const backend = {
+      kind: "openai-completions",
+      baseUrl: `${rt.url}/v1`,
+      key: "k",
+      locality: "local",
+      concurrency: 8,
+      warmup: false,
+    };
+    const { url } = await kvasir([
+      { ...backend, id: "card", models: [model("qwen")] },
+      { ...backend, id: "plain", inlineReasoning: "off", models: [model("qwen-as-is")] },
+    ]);
+    const read = async (id: string) => {
+      const blocks: string[] = [];
+      let thinking = "";
+      let text = "";
+      for await (const ev of piStream(
+        piModel(url, id),
+        { messages: [{ role: "user", content: "How many?", timestamp: 1 }] },
+        { apiKey: "a-kvasir-token" },
+      )) {
+        if (ev.type.endsWith("_start") || ev.type.endsWith("_end")) blocks.push(ev.type);
+        if (ev.type === "thinking_delta") thinking += ev.delta;
+        if (ev.type === "text_delta") text += ev.delta;
+      }
+      return { blocks, thinking, text };
+    };
+    expect(await read("qwen")).toEqual({
+      blocks: ["thinking_start", "thinking_end", "text_start", "text_end"],
+      thinking: "Counting the sessions.",
+      text: "There are 12.",
+    });
+    const asIs = await read("qwen-as-is");
+    expect(asIs.thinking).toBe("");
+    expect(asIs.text).toBe("<think>\nCounting the sessions.</think>\n\nThere are 12.");
+    const headers = { authorization: "Bearer a-kvasir-token", "content-type": "application/json" };
+    const whole = await (
+      await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model: "qwen", messages: [{ role: "user", content: "How many?" }] }),
+      })
+    ).json();
+    expect(whole.choices[0].message).toEqual({
+      role: "assistant",
+      content: "There are 12.",
+      reasoning_content: "Counting the sessions.",
+    });
+    expect(() =>
+      parse(
+        JSON.stringify({
+          bind: "x",
+          origin: "http://x",
+          backends: [{ ...backend, id: "a", inlineReasoning: "sometimes", models: [] }],
+        }),
+      ),
+    ).toThrow(/inlineReasoning is off, markers or open/);
+  });
+
+  it("replays a turn's thinking as thinking to the model that wrote it, and leaves another model's out", async () => {
+    const seen: { body?: unknown } = {};
+    const rt = await serve((_req, res, text) => {
+      seen.body = JSON.parse(text);
+      const chunk = (delta: Record<string, unknown>, finish: string | null = null, usage?: unknown) => ({
+        id: "x",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "m",
+        choices: [{ index: 0, delta, finish_reason: finish }],
+        ...(usage ? { usage } : {}),
+      });
+      sse(res, [
+        chunk({ role: "assistant", content: "ok" }),
+        chunk({}, "stop", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
+        "[DONE]",
+      ]);
+    });
+    closers.push(() => rt.server.close());
+    const { url } = await kvasir([
+      {
+        id: "card-fast",
+        kind: "openai-completions",
+        baseUrl: `${rt.url}/v1`,
+        key: "k",
+        locality: "local",
+        concurrency: 8,
+        warmup: false,
+        models: [
+          {
+            id: "qwen-fast",
+            upstream: "qwen",
+            name: "Qwen",
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 32768,
+            maxTokens: 4096,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
+      },
+    ]);
+    const usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    // a client keeps a turn under its own provider and Kvasir's catalog id
+    const turn = (model: string, thinking: string, text: string) => ({
+      role: "assistant" as const,
+      api: "pi-messages" as never,
+      provider: "kvasir-concierge" as never,
+      model,
+      content: [
+        { type: "thinking" as const, thinking, thinkingSignature: "reasoning_content" },
+        { type: "text" as const, text },
+      ],
+      usage,
+      stopReason: "stop" as const,
+      timestamp: 2,
+    });
+    for await (const _ of piStream(
+      piModel(url, "qwen-fast"),
+      {
+        messages: [
+          { role: "user", content: "How many?", timestamp: 1 },
+          turn("qwen-fast", "earlier thought", "Earlier answer"),
+          turn("claude", "another model's thought", "Claude said"),
+          { role: "user", content: "Again", timestamp: 3 },
+        ],
+      },
+      { apiKey: "a-kvasir-token" },
+    )) {
+      // the reply is not what this test reads
+    }
+    const sent = JSON.stringify(seen.body);
+    expect(sent).toContain('"reasoning_content":"earlier thought"');
+    expect(sent).not.toContain("another model's thought");
+    const assistants = (seen.body as { messages: { role: string; content: unknown }[] }).messages.filter(
+      (m) => m.role === "assistant",
+    );
+    expect(assistants.map((m) => m.content)).toEqual(["Earlier answer", "Claude said"]);
+  });
+
   it("refuses a configuration that names a kind Kvasir has not got", () => {
     expect(() =>
       parse(
