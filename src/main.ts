@@ -196,16 +196,18 @@ const address = await listen(k, config.bind);
 console.log(
   `kvasir ${VERSION} serving ${address} as ${config.origin}, ${config.backends.length} backend(s), warming`,
 );
-// long-lived and warmed, never on demand (§8.5)
+// long-lived and warmed, never on demand (§8.5): one try at start, then again until a first token
 await Promise.all(k.backends.list.map((b) => b.warmup()));
 for (const b of k.backends.list) {
   const admitted =
     b.config.locality === "remote"
       ? ""
       : `, admitted: ${[...b.admitted].join(", ") || `none (kvasir admission run --backend ${b.config.id})`}`;
+  const again = b.config.warmup === false ? "" : ", trying again";
   console.log(
-    `  ${b.config.id}: ${b.health.warming ? `still warming (${b.health.lastError ?? "no first token yet"})` : "warm"}${admitted}`,
+    `  ${b.config.id}: ${b.health.warming ? `still warming (${b.health.lastError ?? "no first token yet"})${again}` : "warm"}${admitted}`,
   );
+  if (b.health.warming) void b.keepWarm(undefined, (line) => console.log(`  ${line}`));
 }
 process.on("SIGINT", () => {
   k.close().then(() => process.exit(0));
