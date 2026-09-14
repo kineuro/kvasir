@@ -34,6 +34,8 @@ export function chatgptBackend(backends: Backends, subscriptions: Subscriptions)
     locality: "remote",
     concurrency: 8,
     builtin: true,
+    // there is no subscription to warm it with: a stream reaches it only for a person signed in
+    warmup: false,
     models: provider.getModels().map((m) => ({
       id: m.id,
       name: m.name,

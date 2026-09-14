@@ -233,6 +233,11 @@ describe("ChatGPT in the policy", () => {
     ).toBe(404);
     k.held.sync();
     expect(k.backends.get("chatgpt")).toBeDefined();
+    // it is never warmed: a stream reaches it only with the subscription of a person signed in
+    const own = k.backends.get("chatgpt");
+    expect(own?.config.warmup).toBe(false);
+    await own?.warmup();
+    expect(own?.health.lastError).toBeNull();
     // a person signs in; an app has no subscription of its own
     const post = (path: string, token: string) =>
       fetch(`${url}${path}`, { method: "POST", headers: as(token) });

@@ -4,6 +4,10 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- Kvasir no longer warms its own ChatGPT backend when it starts. With no subscription to warm it with, the try only left an error in its health. The line Kvasir starts with counts only the models an admin added.
+
 ## [1.0.0-alpha.4] - 2026-09-14
 
 ### Added
