@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import { read } from "./config.js";
-import { described, HeldRefused, type Tried, tryBackend } from "./held.js";
+import { described, HeldRefused, RUNTIME_BACKEND, type Tried, tryBackend } from "./held.js";
 import { readable } from "./local.js";
 import { build, listen, ready, VERSION } from "./server.js";
 import { SYSTEM } from "./subscriptions.js";
@@ -100,12 +100,14 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
         })),
       };
       if (args[1] === "test") {
-        const d = described(input, { modelsOptional: true });
+        const d = described(input, { modelsOptional: true, hostAlias: config.hostAlias });
+        if (d.note) console.log(d.note);
         const tried = await tryBackend(d.config, d.key);
         sayTried(tried);
         if (tried.models.some((m) => !m.answered)) process.exitCode = 1;
       } else {
-        const { backend, tried } = await k.held.add(input, by);
+        const { backend, tried, note } = await k.held.add(input, by);
+        if (note) console.log(note);
         sayTried(tried);
         console.log(
           `added ${backend.config.id}${backend.config.locality === "local" ? "; a Kvasir serving this database warms and admits it" : ""}`,
@@ -167,16 +169,30 @@ if (args[0] === "subscriptions" && ["list", "sign-in", "sign-out"].includes(args
   process.exit(process.exitCode ?? 0);
 }
 
-// `kvasir local list | location | lookup | download | pause | resume | remove | token`
+// `kvasir local list | location | lookup | download | pause | resume | remove | token | start | stop`
 // (record 23): local models on the same database. A download, or a resume, is
 // left to a Kvasir serving the database when one takes it within seconds, and
 // is otherwise downloaded here until it is done. Stopped with Ctrl-C, it carries
 // on when a Kvasir starts on the database, or with `kvasir local resume`.
+// A start or a stop (record 24) is kept in the database as what an admin wants,
+// carried out here at once on the install's runtime, and followed by a Kvasir
+// serving the database, which warms and admits a model once it is loaded.
 if (args[0] === "local") {
   const verb = args[1] ?? "";
   const usage =
-    "kvasir local list | location [--set PATH] | lookup --repo OWNER/NAME [--revision V] [--include GLOB]... | download --repo OWNER/NAME [--revision V] [--include GLOB]... | pause|resume|remove --id N | token --file FILE | token --clear";
-  const known = ["list", "location", "lookup", "download", "pause", "resume", "remove", "token"];
+    "kvasir local list | location [--set PATH] | lookup --repo OWNER/NAME [--revision V] [--include GLOB]... | download --repo OWNER/NAME [--revision V] [--include GLOB]... | pause|resume|remove --id N | start --id N [--file PATH] [--wait SECONDS] | stop --id N | token --file FILE | token --clear";
+  const known = [
+    "list",
+    "location",
+    "lookup",
+    "download",
+    "pause",
+    "resume",
+    "remove",
+    "token",
+    "start",
+    "stop",
+  ];
   if (
     !known.includes(verb) ||
     ((verb === "lookup" || verb === "download") && !flag("--repo")) ||
@@ -197,14 +213,24 @@ if (args[0] === "local") {
   const k = build(config);
   try {
     if (verb === "list") {
+      await k.runner?.look();
       const s = k.local.status();
       console.log(
         `new downloads go to ${s.location}${s.free_bytes === null ? "" : `, with ${readable(s.free_bytes)} free`}; ${s.token ? "a Hugging Face token is set" : "no Hugging Face token is set"}`,
       );
+      if (s.runtime)
+        console.log(
+          `the runtime, llama.cpp ${s.runtime.build} ${s.runtime.variant}, ${s.runtime.reachable ? `answers${s.runtime.serving === null ? " with no model loaded" : `, serving model ${s.runtime.serving}`}` : "does not answer"}`,
+        );
       for (const m of s.models) {
         console.log(
           `${m.id}  ${m.repo}@${m.revision}  ${m.commit.slice(0, 12)}  ${m.state}  ${readable(m.bytes_done)} of ${readable(m.bytes_total)} in ${m.files} file(s)  ${m.path}${m.error ? `  ${m.error}` : ""}`,
         );
+        if (m.run)
+          console.log(
+            `    ${m.run.state} as ${m.run.model}${m.run.context ? `, ${m.run.context} tokens of context` : ""}${m.run.error ? `: ${m.run.error}` : ""}`,
+          );
+        else if (m.startable) console.log(`    starts with kvasir local start --id ${m.id}`);
         for (const c of m.serve) console.log(`    ${c.runtime}: ${c.command}`);
       }
     } else if (verb === "location") {
@@ -258,6 +284,40 @@ if (args[0] === "local") {
         console.error(`kvasir: model ${row.id} failed: ${after.error}`);
         process.exitCode = 1;
       } else console.log(`model ${row.id} is ${after?.state ?? "removed"}`);
+    } else if (verb === "start" || verb === "stop") {
+      const runner = k.runner;
+      if (!runner) {
+        console.error(
+          "kvasir: kvasir.json names no runtime (local.runtime), so Kvasir starts no model here: start a model server with one of the commands kvasir local list shows, then add it with kvasir models add",
+        );
+        process.exit(2);
+      }
+      runner.say = (line) => console.log(line);
+      const id = idOf();
+      if (verb === "stop") {
+        const row = await runner.stop(id);
+        console.log(`model ${id} is ${row.run?.state ?? "not started"}`);
+      } else {
+        let row = await runner.start(id, by, flag("--file"));
+        const until = Date.now() + Number(flag("--wait") ?? 600) * 1000;
+        while (row.run?.state === "starting" && Date.now() < until) {
+          await new Promise((r) => setTimeout(r, 2_000));
+          await runner.tick();
+          row = k.local.get(id) ?? row;
+        }
+        if (row.run?.state === "serving")
+          console.log(
+            `model ${id} is loaded as ${row.run.model}; a Kvasir serving this database warms and admits it, and the stations use it once it is admitted`,
+          );
+        else if (row.run?.state === "failed") {
+          console.error(`kvasir: model ${id} did not start: ${row.run.error}`);
+          for (const line of row.run.log) console.error(`  ${line}`);
+          process.exitCode = 1;
+        } else
+          console.log(
+            `model ${id} is ${row.run?.state ?? "starting"}${row.run?.error ? ` (${row.run.error})` : ""}; a Kvasir serving this database carries it on, and kvasir local list shows it`,
+          );
+      }
     } else if (verb === "pause") {
       const row = k.local.pause(idOf());
       console.log(`model ${row.id} is ${row.state}`);
@@ -503,6 +563,17 @@ k.held.watch();
 k.local.say = (line) => console.log(`  ${line}`);
 const carrying = k.local.start();
 if (carrying > 0) console.log(`  ${carrying} local model download(s) to carry on`);
+// the models an admin started on the runtime are followed, and loaded again where the runtime lost them (record 24)
+if (k.runner) {
+  k.runner.say = (line) => console.log(`  ${line}`);
+  console.log(
+    `  the runtime: llama.cpp ${k.runner.config.build} ${k.runner.config.variant} at ${k.runner.config.url}`,
+  );
+  k.runner.follow();
+  // a model held from before, loaded while no Kvasir served, is warmed and admitted as one started here is
+  const own = k.backends.get(RUNTIME_BACKEND);
+  if (own?.config.models.some((m) => !own.admitted.has(m.id))) void ready(k, own);
+}
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     k.close().then(() => process.exit(0));

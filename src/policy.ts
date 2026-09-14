@@ -162,11 +162,17 @@ export class Policy {
     });
   }
 
+  /**
+   * The local backend a purpose with no row goes to: the first that serves its content class and, while the
+   * gate holds, has a model that passed admission, so a model the suite refused is no one's default (§8.6,
+   * record 24).
+   */
   private defaultBackend(p: Purpose): Backend | undefined {
     return this.backends.list.find(
       (b) =>
         b.config.locality === "local" &&
         b.config.models.length > 0 &&
+        (!this.backends.gate || b.config.models.some((m) => b.admitted.has(m.id))) &&
         (!b.config.classes || CLASS_RANK[b.config.classes] >= CLASS_RANK[p.content]),
     );
   }
@@ -271,14 +277,24 @@ export class Policy {
         `no ChatGPT subscription is signed in for this stream, so ${purposeId} runs on the default`,
       );
     }
-    if (!chosen)
-      throw new Refused(503, [
-        {
-          layer: "deployment",
-          fact: "no local backend serves this content class",
-          relaxation: "register a local backend",
-        },
-      ]);
+    if (!chosen) {
+      // a local model still in admission, or refused by it, is named rather than left unsaid (record 24)
+      const unadmitted = this.backends.gate
+        ? this.backends.list.find((b) => b.config.locality === "local" && b.config.models.length > 0)
+        : undefined;
+      const refusal: Refusal = unadmitted
+        ? {
+            layer: "deployment",
+            fact: `${unadmitted.config.id} serves ${unadmitted.config.models.map((m) => m.id).join(", ")}, which has not passed admission`,
+            relaxation: "wait for admission to finish, or run it again",
+          }
+        : {
+            layer: "deployment",
+            fact: "no local backend serves this content class",
+            relaxation: "register a local backend",
+          };
+      throw new Refused(503, [refusal]);
+    }
     if (chosen.config.locality === "remote" && content === "identifiers") {
       throw new Refused(403, [
         { layer: "policy", fact: `${purposeId} carries identifiers and ${chosen.config.id} is remote` },
