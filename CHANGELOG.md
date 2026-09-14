@@ -4,6 +4,10 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- A stream through Kvasir no longer goes quiet while the model reads a long prompt. Both doors write a comment on a stream that has said nothing for 15 seconds, which no reader of an event stream takes as an event, so a caller's HTTP client keeps the response: Node's fetch ends one that says nothing for 300 seconds. On the processor, llama.cpp read a 5,571-token prompt of the assistant's for 426 seconds before its first token, and the turn failed as "terminated" with nothing written.
+
 ## [1.0.0-alpha.5] - 2026-09-14
 
 ### Added
