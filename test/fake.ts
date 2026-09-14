@@ -5,6 +5,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { FIXTURES } from "../src/fixtures/suite.js";
+import { described } from "../src/held.js";
+import type { Kvasir } from "../src/server.js";
 
 export async function body(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -198,3 +200,18 @@ export const local = (url: string, id = "card", models = [entry("qwen")]) => ({
   warmup: false,
   models,
 });
+
+/**
+ * Backends written the way a test writes them, held by a built Kvasir the way
+ * an admin's add holds them once their models answered. They are not asked
+ * here: each test's fake runtime answers what that test asks. A runtime the
+ * operator recorded is kept.
+ */
+export function hold(k: Kvasir, backends: unknown[]): void {
+  for (const raw of backends) {
+    const b = raw as Record<string, unknown>;
+    const { config, key } = described(b);
+    if (b.runtime) config.runtime = b.runtime as never;
+    k.held.put(config, "test", key);
+  }
+}

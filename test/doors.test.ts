@@ -12,7 +12,9 @@ import type { Model } from "@earendil-works/pi-ai";
 import { stream as piStream } from "@earendil-works/pi-ai/api/pi-messages";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
+import { described } from "../src/held.js";
 import { build, type Kvasir, listen } from "../src/server.js";
+import { hold } from "./fake.js";
 
 function sse(res: ServerResponse, events: unknown[], eventNames?: string[]) {
   res.writeHead(200, { "content-type": "text/event-stream" });
@@ -138,10 +140,10 @@ async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> 
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
       admission: { queue: 8, waitCapSeconds: 60, gate: false },
-      backends,
     }),
   );
   const k = build(config);
+  hold(k, backends);
   const url = await listen(k, "127.0.0.1:0");
   closers.push(() => k.close());
   return { k, url };
@@ -414,15 +416,9 @@ describe("the door", () => {
       content: "There are 12.",
       reasoning_content: "Counting the sessions.",
     });
-    expect(() =>
-      parse(
-        JSON.stringify({
-          bind: "x",
-          origin: "http://x",
-          backends: [{ ...backend, id: "a", inlineReasoning: "sometimes", models: [] }],
-        }),
-      ),
-    ).toThrow(/inlineReasoning is off, markers or open/);
+    expect(() => described({ ...backend, id: "a", inlineReasoning: "sometimes", models: ["m"] })).toThrow(
+      /inlineReasoning: off, markers or open/,
+    );
   });
 
   it("replays a turn's thinking as thinking to the model that wrote it, and leaves another model's out", async () => {
@@ -512,15 +508,12 @@ describe("the door", () => {
     expect(assistants.map((m) => m.content)).toEqual(["Earlier answer", "Claude said"]);
   });
 
-  it("refuses a configuration that names a kind Kvasir has not got", () => {
+  it("refuses a backend of a kind Kvasir has not got, and a configuration that still names backends", () => {
     expect(() =>
-      parse(
-        JSON.stringify({
-          bind: "x",
-          origin: "http://x",
-          backends: [{ id: "a", kind: "gemini", baseUrl: "http://x", locality: "local", models: [] }],
-        }),
-      ),
+      described({ id: "a", kind: "gemini", baseUrl: "http://x", locality: "local", models: ["m"] }),
     ).toThrow(/kind is one of/);
+    expect(() => parse(JSON.stringify({ bind: "x", origin: "http://x", backends: [] }))).toThrow(
+      /held in Kvasir's database/,
+    );
   });
 });

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
 import { build, type Kvasir, listen } from "../src/server.js";
+import { hold } from "./fake.js";
 
 const closers: (() => Promise<void> | void)[] = [];
 afterAll(async () => {
@@ -68,31 +69,29 @@ async function kvasir(localUrl: string, remoteUrl: string): Promise<{ k: Kvasir;
         { id: "assistant.title", app: "nils-assistant", content: "catalog", kind: "background" },
         { id: "assistant.linkage", app: "nils-assistant", content: "identifiers", kind: "foreground" },
       ],
-      backends: [
-        {
-          id: "card",
-          kind: "openai-completions",
-          baseUrl: `${localUrl}/v1`,
-          key: "runtime-key",
-          locality: "local",
-          concurrency: 8,
-          warmup: false,
-          models: [model("local-m")],
-        },
-        {
-          id: "vendor",
-          kind: "openai-completions",
-          baseUrl: `${remoteUrl}/v1`,
-          provider: "minimax",
-          locality: "remote",
-          concurrency: 4,
-          warmup: false,
-          models: [model("remote-m")],
-        },
-      ],
     }),
   );
   const k = build(config);
+  hold(k, [
+    {
+      id: "card",
+      kind: "openai-completions",
+      baseUrl: `${localUrl}/v1`,
+      key: "runtime-key",
+      locality: "local",
+      concurrency: 8,
+      warmup: false,
+      models: [model("local-m")],
+    },
+    {
+      id: "vendor",
+      kind: "openai-completions",
+      baseUrl: `${remoteUrl}/v1`,
+      locality: "remote",
+      concurrency: 4,
+      models: [model("remote-m")],
+    },
+  ]);
   const url = await listen(k, "127.0.0.1:0");
   closers.push(() => k.close());
   return { k, url, dir };
@@ -115,7 +114,7 @@ describe("purposes and the policy table", () => {
     // warm both by hand: a grant refuses a warming backend at the health layer
     for (const b of k.backends.list) b.health.warming = false;
     // the organisation's key, stored sealed
-    const put = await fetch(`${url}/v1/credentials/minimax`, {
+    const put = await fetch(`${url}/v1/credentials/vendor`, {
       method: "PUT",
       headers: admin,
       body: JSON.stringify({ secret: "sk-minimax-test-secret-value" }),
@@ -124,7 +123,7 @@ describe("purposes and the policy table", () => {
     expect((await put.json()).shown).toBe("never");
     const bytes = readFileSync(join(dir, "kvasir.sqlite"));
     expect(bytes.includes(Buffer.from("sk-minimax-test-secret-value"))).toBe(false);
-    expect(k.credentials.open("minimax")).toBe("sk-minimax-test-secret-value");
+    expect(k.credentials.open("vendor")).toBe("sk-minimax-test-secret-value");
     // the table, before anything is set: every purpose local by default
     const table = await (await fetch(`${url}/v1/purposes`, { headers: reader })).json();
     expect(table.purposes.map((p: { purpose: string; backend: string }) => [p.purpose, p.backend])).toEqual([
@@ -257,15 +256,15 @@ describe("purposes and the policy table", () => {
     const backends = await (await fetch(`${url}/v1/backends`, { headers: reader })).json();
     expect(backends.backends.find((b: { id: string }) => b.id === "vendor").credential).toBe(true);
     // rotation re-encrypts under the same seal key; the old ciphertext is gone
-    const before = k.store.db.prepare("SELECT sealed FROM credential WHERE provider = 'minimax'").get() as {
+    const before = k.store.db.prepare("SELECT sealed FROM credential WHERE provider = 'vendor'").get() as {
       sealed: Uint8Array;
     };
-    k.credentials.put("minimax", "sk-minimax-test-secret-value");
-    const after = k.store.db.prepare("SELECT sealed FROM credential WHERE provider = 'minimax'").get() as {
+    k.credentials.put("vendor", "sk-minimax-test-secret-value");
+    const after = k.store.db.prepare("SELECT sealed FROM credential WHERE provider = 'vendor'").get() as {
       sealed: Uint8Array;
     };
     expect(Buffer.from(after.sealed).equals(Buffer.from(before.sealed))).toBe(false);
-    expect(k.credentials.open("minimax")).toBe("sk-minimax-test-secret-value");
+    expect(k.credentials.open("vendor")).toBe("sk-minimax-test-secret-value");
   });
 
   it("lets a minted key reach a remote backend only through a purpose in its allowlist and within its class", async () => {
@@ -277,7 +276,7 @@ describe("purposes and the policy table", () => {
     );
     const { k, url } = await kvasir(local.url, remote.url);
     for (const b of k.backends.list) b.health.warming = false;
-    await fetch(`${url}/v1/credentials/minimax`, {
+    await fetch(`${url}/v1/credentials/vendor`, {
       method: "PUT",
       headers: admin,
       body: JSON.stringify({ secret: "sk-minimax-test-secret-value" }),
@@ -346,7 +345,7 @@ describe("the OpenAI-shaped door", () => {
     );
     const { k, url } = await kvasir(local.url, remote.url);
     for (const b of k.backends.list) b.health.warming = false;
-    await fetch(`${url}/v1/credentials/minimax`, {
+    await fetch(`${url}/v1/credentials/vendor`, {
       method: "PUT",
       headers: admin,
       body: JSON.stringify({ secret: "sk-minimax-test-secret-value" }),

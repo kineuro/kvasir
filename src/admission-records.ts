@@ -3,7 +3,7 @@
 // read by the door and the command line, and the source of each local
 // backend's admitted set at start.
 
-import type { Backends } from "./backends.js";
+import type { Backend, Backends } from "./backends.js";
 import type { Store } from "./store.js";
 import type { AdmissionRecord, Runtime } from "./suite.js";
 
@@ -91,22 +91,18 @@ export class Admissions {
    * A record is for a runtime version; when the runtime is probed and it
    * moved, the record no longer admits (§8.6: re-run on every upgrade).
    */
-  async load(
-    backends: Backends,
-    probe?: (backend: Backends["list"][number]) => Promise<Runtime>,
-  ): Promise<void> {
-    for (const b of backends.list) {
-      if (b.config.locality === "remote") continue;
-      const runtime = probe ? await probe(b).catch(() => undefined) : undefined;
-      for (const m of b.config.models) {
-        const rec = this.latest(
-          b.config.id,
-          m.id,
-          runtime && runtime.name !== "unknown" ? runtime : undefined,
-        );
-        if (rec?.passed) b.admitted.add(m.id);
-        else b.admitted.delete(m.id);
-      }
+  async load(backends: Backends, probe?: (backend: Backend) => Promise<Runtime>): Promise<void> {
+    for (const b of backends.list) await this.loadOne(b, probe);
+  }
+
+  /** One backend's admitted set, read the way `load` reads every backend's at start: a backend just added is read the same way. */
+  async loadOne(b: Backend, probe?: (backend: Backend) => Promise<Runtime>): Promise<void> {
+    if (b.config.locality === "remote") return;
+    const runtime = probe ? await probe(b).catch(() => undefined) : undefined;
+    for (const m of b.config.models) {
+      const rec = this.latest(b.config.id, m.id, runtime && runtime.name !== "unknown" ? runtime : undefined);
+      if (rec?.passed) b.admitted.add(m.id);
+      else b.admitted.delete(m.id);
     }
   }
 }

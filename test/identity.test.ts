@@ -11,6 +11,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
 import { build, type Kvasir, listen } from "../src/server.js";
 import { SCHEMA } from "../src/store.js";
+import { hold } from "./fake.js";
 
 const vectors = join(import.meta.dirname, "vectors");
 const closers: (() => Promise<void> | void)[] = [];
@@ -75,52 +76,31 @@ async function kvasir(
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
       admission: { queue: 8, waitCapSeconds: 60, gate: false },
-      backends: [
-        {
-          id: "card",
-          kind: "openai-completions",
-          baseUrl: `${backendUrl}/v1`,
-          key: "runtime-key",
-          locality: "local",
-          concurrency: 8,
-          warmup: false,
-          models: [
-            {
-              id: "m",
-              name: "M",
-              reasoning: false,
-              input: ["text"],
-              contextWindow: 4096,
-              maxTokens: 256,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            },
-          ],
-        },
-        {
-          id: "vendor",
-          kind: "openai-completions",
-          baseUrl: `${backendUrl}/v1`,
-          key: "vendor-key",
-          locality: "remote",
-          concurrency: 4,
-          warmup: false,
-          models: [
-            {
-              id: "remote-m",
-              name: "R",
-              reasoning: false,
-              input: ["text"],
-              contextWindow: 4096,
-              maxTokens: 256,
-              cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-            },
-          ],
-        },
-      ],
       ...over,
     }),
   );
   const k = build(config);
+  hold(k, [
+    {
+      id: "card",
+      kind: "openai-completions",
+      baseUrl: `${backendUrl}/v1`,
+      key: "runtime-key",
+      locality: "local",
+      concurrency: 8,
+      warmup: false,
+      models: [{ id: "m", name: "M", contextWindow: 4096, maxTokens: 256 }],
+    },
+    {
+      id: "vendor",
+      kind: "openai-completions",
+      baseUrl: `${backendUrl}/v1`,
+      key: "vendor-key",
+      locality: "remote",
+      concurrency: 4,
+      models: [{ id: "remote-m", name: "R", contextWindow: 4096, maxTokens: 256 }],
+    },
+  ]);
   const url = await listen(k, "127.0.0.1:0");
   closers.push(() => k.close());
   return { k, url };

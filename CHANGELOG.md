@@ -4,6 +4,18 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- Kvasir holds its models in its own database. An admin tries a server's models (`POST /v1/backends/test`, `kvasir models test`), adds a backend (`POST /v1/backends`, `kvasir models add`), which is held only once every one of its models answered one short request, and removes one (`DELETE /v1/backends/{id}`, `kvasir models remove`), which lets go of its key and of the policy rows that named it. A local backend added while Kvasir runs is warmed and admitted there, and one added from the command line is followed within seconds. A backend's key is sealed under the backend's own id. `GET /v1/backends` shows an admin each backend's address and who added it, and everyone each model's window and admission.
+- `kvasir.json` no longer takes `backends` or `oauth`, and refuses a file that still names them: a fresh Kvasir starts with no model. `kvasir keys list` and `kvasir keys revoke` join `kvasir keys mint`.
+- Kvasir's version is read from its package; the constant said 1.0.0-alpha.2.
+
+### Removed
+
+- The personal credentials of the first design: a key a person brought, and an OAuth grant through a redirect to Kvasir's own address, with their doors and tables.
+- The migration of the seal key published with the source before 1.0.0-alpha.1.
+- The `--streams` and `--rounds` flags that `kvasir admission run` named and never read.
+
 ### Fixed
 
 - A local backend whose warm-up failed at start is tried again until it answers: after five seconds, then waits doubling to a minute, then every minute. One failed try, a network not up yet at boot or a model still loading, used to leave the backend warming, and every request to it refused, until Kvasir was started again.

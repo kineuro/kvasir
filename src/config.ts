@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The configuration: the door, the backends and their models (Wave 4c §8.5).
+// The configuration: the door, identity, the one database and the files of
+// its secrets, admission, and the purposes apps registered (Wave 4c §8.5).
+// The models are not in it: Kvasir holds them in its database, where an admin
+// adds each one once it answered (src/held.ts).
 
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { type OAuthProvider, oauthProviders } from "./personal.js";
 
 export type BackendKind = "openai-completions" | "anthropic-messages";
+
+/** The adapters Kvasir has (§8.1): a fixed list in code, never a URL a caller names. */
+export const BACKEND_KINDS: BackendKind[] = ["openai-completions", "anthropic-messages"];
 
 export interface ModelEntry {
   id: string;
@@ -21,19 +26,15 @@ export interface ModelEntry {
 
 export interface BackendConfig {
   id: string;
-  /** A fixed list in code (§8.1): the adapters Kvasir has, never a URL a caller names. */
   kind: BackendKind;
   baseUrl: string;
-  /** The runtime key: the one key the runtime knows, held here and never shown. */
-  keyFile?: string;
-  key?: string;
   locality: "local" | "remote";
-  /** Streams admitted at once (§8.7); the queue and the wait cap arrive with C2. */
+  /** Streams admitted at once (§8.7); the queue behind them and its wait cap are the configuration's. */
   concurrency: number;
   models: ModelEntry[];
-  /** A warm-up prompt sent at start; the backend is warming until its first token (§8.5). */
+  /** A warm-up prompt sent at start and tried again until it answers; the backend is warming until its first token (§8.5). */
   warmup?: boolean;
-  /** The provider a remote backend's credential is stored under (§8.4); the key comes from the credential store, not this file. */
+  /** The credential the backend's key is sealed under (§8.4): the backend's own id, when it was added with a key. */
   provider?: string;
   /** The highest content class this backend may carry; every class when absent. */
   classes?: import("./keys.js").ContentClass;
@@ -42,10 +43,10 @@ export interface BackendConfig {
   /** The runtime as the operator records it, when the runtime does not say (§8.6). */
   runtime?: { name: string; version: string; build: string };
   /**
-   * pi-ai's compatibility flags for this backend's API, set here by the
-   * operator who knows the runtime; a local OpenAI-shaped runtime (SGLang,
-   * vLLM) gets `system` rather than `developer`, no `store`, and
-   * `max_tokens` unless told otherwise. A client never sends any.
+   * pi-ai's compatibility flags for this backend's API, set by the admin who
+   * knows the runtime; a local OpenAI-shaped runtime (SGLang, vLLM) gets
+   * `system` rather than `developer`, no `store`, and `max_tokens` unless told
+   * otherwise. A client never sends any.
    */
   compat?: Record<string, unknown>;
   /**
@@ -71,36 +72,17 @@ export interface Config {
   sealKeyFile: string;
   /** The purposes apps registered (§8.3). */
   purposes: import("./policy.js").Purpose[];
-  backends: BackendConfig[];
-  /** The OAuth providers a person may bring a subscription through (C5); the wave's two by default, an operator's rows replacing them by name. */
-  oauth: OAuthProvider[];
 }
 
 export function parse(text: string): Config {
-  const raw = JSON.parse(text) as Partial<Config>;
+  const raw = JSON.parse(text) as Partial<Config> & { backends?: unknown; oauth?: unknown };
   if (!raw.bind || !raw.origin) throw new Error("kvasir.json: bind and origin");
-  if (!Array.isArray(raw.backends) || raw.backends.length === 0)
-    throw new Error("kvasir.json: at least one backend");
-  const kinds: BackendKind[] = ["openai-completions", "anthropic-messages"];
-  const ids = new Set<string>();
-  for (const b of raw.backends) {
-    if (!kinds.includes(b.kind))
-      throw new Error(`kvasir.json: backend ${b.id}: kind is one of ${kinds.join(", ")}`);
-    if (!b.baseUrl?.startsWith("http")) throw new Error(`kvasir.json: backend ${b.id}: baseUrl`);
-    if (b.locality !== "local" && b.locality !== "remote")
-      throw new Error(`kvasir.json: backend ${b.id}: locality is local or remote`);
-    b.concurrency = b.concurrency ?? 8;
-    b.warmup = b.warmup ?? true;
-    if (b.inlineReasoning !== undefined && !["off", "markers", "open"].includes(b.inlineReasoning))
-      throw new Error(`kvasir.json: backend ${b.id}: inlineReasoning is off, markers or open`);
-    for (const m of b.models ?? []) {
-      if (ids.has(m.id)) throw new Error(`kvasir.json: model ${m.id} is listed twice`);
-      ids.add(m.id);
-      if (typeof m.contextWindow !== "number" || typeof m.maxTokens !== "number") {
-        throw new Error(`kvasir.json: model ${m.id}: contextWindow and maxTokens are measured numbers`);
-      }
-    }
-  }
+  if (raw.backends !== undefined)
+    throw new Error(
+      "kvasir.json: the models are held in Kvasir's database, not in this file; add each with `kvasir models add` or from the desk",
+    );
+  if (raw.oauth !== undefined)
+    throw new Error("kvasir.json: oauth is not a setting; a person signs in to their own subscription");
   return {
     bind: raw.bind,
     origin: raw.origin.replace(/\/+$/u, ""),
@@ -113,20 +95,12 @@ export function parse(text: string): Config {
       gate: raw.admission?.gate ?? true,
     },
     sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
-    oauth: oauthProviders((raw as { oauth?: unknown }).oauth),
     purposes: purposes(raw.purposes ?? []),
-    backends: raw.backends as BackendConfig[],
   };
 }
 
 export function read(path: string): Config {
   return parse(readFileSync(path, "utf8"));
-}
-
-/** The runtime key of a backend: the file, else the inline value, else none. */
-export function keyOf(b: BackendConfig): string | undefined {
-  if (b.keyFile) return readFileSync(b.keyFile, "utf8").trim();
-  return b.key;
 }
 
 /** The pepper from its file, or a new one written there with mode 600. */
