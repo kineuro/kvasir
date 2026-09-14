@@ -4,6 +4,8 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.4] - 2026-09-14
+
 ### Added
 
 - ChatGPT through a person's own subscription. A person signs in with a device code (`POST /v1/subscriptions/chatgpt/sign-in`, then `GET /v1/subscriptions` until it is signed in), chooses the model their streams use (`PUT /v1/subscriptions/chatgpt`) and signs out (`DELETE /v1/subscriptions/chatgpt`). The credential is sealed under that person and refreshed before it expires. Where nobody signs in, the subscription signed in is the install's, and `kvasir subscriptions sign-in` signs it in from the command line. Kvasir's own `chatgpt` backend streams through pi-ai's OpenAI Codex adapter with the token of whoever streams. A purpose an admin moves to it goes to that person's subscription, runs on the local default for someone with none signed in, needs the written reason when it carries rows, and never carries identifiers.
