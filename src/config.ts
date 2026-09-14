@@ -6,6 +6,7 @@
 
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { HUB } from "./local.js";
 
 export type BackendKind = "openai-completions" | "anthropic-messages" | "openai-codex-responses";
 
@@ -77,6 +78,8 @@ export interface Config {
   sealKeyFile: string;
   /** The purposes apps registered (§8.3). */
   purposes: import("./policy.js").Purpose[];
+  /** Local models (record 23): the Hugging Face Hub they download from, or a mirror of it. The location is a setting in the database. */
+  local: { endpoint: string };
 }
 
 export function parse(text: string): Config {
@@ -101,7 +104,18 @@ export function parse(text: string): Config {
     },
     sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
     purposes: purposes(raw.purposes ?? []),
+    local: { endpoint: endpointOf(raw.local?.endpoint) },
   };
+}
+
+/** The hub local models download from: huggingface.co, or the mirror kvasir.json names. */
+function endpointOf(value: unknown): string {
+  if (value === undefined) return HUB;
+  if (typeof value !== "string" || !/^https?:\/\/[^\s/]+/u.test(value))
+    throw new Error(
+      "kvasir.json: local.endpoint is the address of a Hugging Face Hub, starting with http:// or https://",
+    );
+  return value.replace(/\/+$/u, "");
 }
 
 export function read(path: string): Config {

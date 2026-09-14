@@ -63,6 +63,8 @@ export class Store {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
+    // a second Kvasir on the database, such as the command line beside a server, waits its turn to write rather than failing
+    this.db.exec("PRAGMA busy_timeout = 5000");
     for (const s of SCHEMA) this.db.exec(s);
   }
 

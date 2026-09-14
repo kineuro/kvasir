@@ -3,6 +3,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import { Admissions } from "./admission-records.js";
 import { Auth, holds, type Principal, Refused } from "./auth.js";
 import { type Backend, Backends } from "./backends.js";
@@ -14,6 +15,7 @@ import { described, Held, HeldRefused, tryBackend } from "./held.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
 import { Lifecycle, LifecycleRefused, parseSource } from "./lifecycle.js";
+import { Local, type LocalOptions, LocalRefused } from "./local.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
 import { CHATGPT, type SubscriptionAuth, Subscriptions, SYSTEM } from "./subscriptions.js";
@@ -35,6 +37,8 @@ export interface Kvasir {
   held: Held;
   /** Each person's own ChatGPT subscription, or the install's where nobody signs in (record 23). */
   subscriptions: Subscriptions;
+  /** Local models: downloaded by Kvasir into a location an admin can change, and served by the admin's own model server (record 23). */
+  local: Local;
   policy: Policy;
   admissions: Admissions;
   /** The model lifecycle (Wave 5 §9.5): registered, admitted, promoted, retired. */
@@ -50,7 +54,10 @@ export interface Kvasir {
   close: () => Promise<void>;
 }
 
-export function build(config: Config, options: { subscriptionAuth?: () => SubscriptionAuth } = {}): Kvasir {
+export function build(
+  config: Config,
+  options: { subscriptionAuth?: () => SubscriptionAuth; local?: LocalOptions } = {},
+): Kvasir {
   const store = new Store(config.store);
   const backends = new Backends(config.admission);
   const keys = new Keys(store, pepper(config.pepperFile));
@@ -62,6 +69,14 @@ export function build(config: Config, options: { subscriptionAuth?: () => Subscr
   // the models this database holds, served from the start; a purpose mapped to one let go returns to its default
   const held = new Held(store, backends, credentials, (id) => policy.forget(id));
   held.sync();
+  // local models download into `models` beside the database until an admin sets a location
+  const local = new Local(
+    store,
+    credentials,
+    config.local.endpoint,
+    resolve(dirname(config.store), "models"),
+    options.local,
+  );
   // ChatGPT through each person's own subscription: Kvasir's own backend, served beside the added ones (record 23)
   const subscriptions = new Subscriptions(
     store,
@@ -142,6 +157,7 @@ export function build(config: Config, options: { subscriptionAuth?: () => Subscr
         credentials,
         held,
         subscriptions,
+        local,
         auth,
         policy,
         admissions,
@@ -165,6 +181,7 @@ export function build(config: Config, options: { subscriptionAuth?: () => Subscr
     credentials,
     held,
     subscriptions,
+    local,
     policy,
     admissions,
     lifecycle,
@@ -174,16 +191,15 @@ export function build(config: Config, options: { subscriptionAuth?: () => Subscr
       const a = server.address();
       return typeof a === "object" && a ? `http://${a.address}:${a.port}` : "";
     },
-    close: () =>
-      new Promise((resolve) => {
-        // a warm-up still being tried, and the following of the database, end with the server
-        held.unwatch();
-        for (const b of backends.list) b.stop();
-        server.close(() => {
-          store.close();
-          resolve();
-        });
-      }),
+    close: async () => {
+      // a warm-up still being tried, and the following of the database, end with the server; a download
+      // stops with what it has, to carry on when Kvasir starts again
+      held.unwatch();
+      for (const b of backends.list) b.stop();
+      await local.stop();
+      await new Promise<void>((done) => server.close(() => done()));
+      store.close();
+    },
   };
   return k;
 }
@@ -252,6 +268,7 @@ async function route(
     credentials: Credentials;
     held: Held;
     subscriptions: Subscriptions;
+    local: Local;
     auth: Auth;
     policy: Policy;
     admissions: Admissions;
@@ -267,6 +284,7 @@ async function route(
     credentials,
     held,
     subscriptions,
+    local,
     auth,
     policy,
     admissions,
@@ -562,6 +580,11 @@ async function route(
   } else if (path === "/v1/ledger" && req.method === "GET") {
     const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
     json(res, 200, { rows: ledger.rows(holds(who, "admin") ? null : who.subject, limit) });
+  } else if (path === "/v1/local" || path.startsWith("/v1/local/")) {
+    // record 23: local models, downloaded by Kvasir and served by the admin's own model server
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "local models are an admin's" } });
+    await localDoor(req, res, path, who, local);
   } else {
     json(res, 404, {
       error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
@@ -574,6 +597,65 @@ function lifecycleError(res: ServerResponse, e: unknown): void {
     json(res, e.status, { error: { code: "lifecycle", message: e.message } });
   else
     json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
+}
+
+/**
+ * The doors of local models (record 23): the listing, the location, a lookup
+ * that keeps nothing, a download queued, paused, resumed and removed, and the
+ * Hugging Face token set and cleared, never shown. Every one is an admin's.
+ */
+async function localDoor(
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  who: Principal,
+  local: Local,
+): Promise<void> {
+  const body = async (): Promise<Record<string, unknown>> => {
+    const text = await readBody(req, 1 << 20);
+    let parsed: unknown;
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      parsed = null;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new LocalRefused(400, "bad_request", "the body is a JSON object");
+    return parsed as Record<string, unknown>;
+  };
+  const model = /^\/v1\/local\/models\/(\d+)(\/pause|\/resume)?$/u.exec(path);
+  try {
+    if (path === "/v1/local" && req.method === "GET") json(res, 200, local.status());
+    else if (path === "/v1/local/location" && req.method === "PUT") {
+      local.setLocation((await body()).path, who.subject);
+      json(res, 200, local.status());
+    } else if (path === "/v1/local/lookup" && req.method === "POST")
+      json(res, 200, await local.lookup(await body()));
+    else if (path === "/v1/local/models" && req.method === "POST")
+      json(res, 202, await local.add(await body(), who.subject));
+    else if (model && !model[2] && req.method === "DELETE") {
+      if (await local.remove(Number(model[1]))) {
+        res.writeHead(204);
+        res.end();
+      } else json(res, 404, { error: { code: "no_such_model", message: `no local model ${model[1]}` } });
+    } else if (model?.[2] === "/pause" && req.method === "POST")
+      json(res, 200, local.pause(Number(model[1])));
+    else if (model?.[2] === "/resume" && req.method === "POST")
+      json(res, 200, local.resume(Number(model[1])));
+    else if (path === "/v1/local/token" && req.method === "PUT") {
+      local.setToken((await body()).token);
+      json(res, 200, { token: true, shown: "never" });
+    } else if (path === "/v1/local/token" && req.method === "DELETE") {
+      res.writeHead(local.clearToken() ? 204 : 404);
+      res.end();
+    } else
+      json(res, 404, {
+        error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
+      });
+  } catch (e) {
+    if (!(e instanceof LocalRefused)) throw e;
+    json(res, e.status, { error: { code: e.code, message: e.message, ...e.detail } });
+  }
 }
 
 /**

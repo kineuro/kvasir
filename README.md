@@ -41,6 +41,15 @@ node dist/main.js --config kvasir.json
 
 `src/` is the service, `test/` its tests against fake backends, and `kvasir.example.json` the configuration with every setting. The models are not in it: Kvasir holds them in its database, and adds each one from the desk or with `kvasir models add` once it answers.
 
+## Local models
+
+Kvasir downloads a model from the Hugging Face Hub into a location an admin can change, resumes a download where it stopped, checks each file against the hub's sha256, and lists every model with its size, its state and the commands that serve it. It runs no model: start your model server on the download, then add that server as any other.
+
+```sh
+node dist/main.js local download --repo OWNER/NAME --include "*Q4_K_M.gguf" --config kvasir.json
+node dist/main.js local list --config kvasir.json
+```
+
 ## License
 
 AGPL-3.0-only, under the same [contributor license agreement](CLA.md) as the engine. See [CONTRIBUTING.md](CONTRIBUTING.md).

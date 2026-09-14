@@ -45,5 +45,8 @@
       "content": "catalog",
       "kind": "background"
     }
-  ]
+  ],
+  "local": {
+    "endpoint": "https://huggingface.co"
+  }
 }

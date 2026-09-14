@@ -10,6 +10,7 @@ import { type Backend, Backends } from "./backends.js";
 import { BACKEND_KINDS, type BackendConfig, type BackendKind, type ModelEntry } from "./config.js";
 import type { Credentials } from "./credentials.js";
 import { CLASSES } from "./keys.js";
+import { HUGGING_FACE } from "./local.js";
 import type { Store } from "./store.js";
 
 export const HELD_SCHEMA = `CREATE TABLE IF NOT EXISTS backend (
@@ -41,6 +42,14 @@ export interface Tried {
 }
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/u;
+
+/** A backend's key is sealed under the backend's own id, so no backend takes the id the Hugging Face token is sealed under. */
+function reserved(): HeldRefused {
+  return new HeldRefused(
+    409,
+    `${HUGGING_FACE} is the name Kvasir seals the Hugging Face token under; a backend takes another name`,
+  );
+}
 
 /** A name for a backend from its first model: lowercase, a dash for anything else. */
 export function idFrom(model: string): string {
@@ -319,6 +328,7 @@ export class Held {
   /** A backend stored and served as described, its models not asked: what `add` does once they answered. */
   put(config: BackendConfig, by: string, key: string | null = null): Backend {
     this.sync();
+    if (config.id === HUGGING_FACE) throw reserved();
     if (this.backends.get(config.id))
       throw new HeldRefused(409, `a backend named ${config.id} is held already`);
     for (const m of config.models) {
@@ -357,8 +367,11 @@ export class Held {
     this.sync();
     if (!named) {
       const base = config.id;
-      for (let n = 2; this.backends.get(config.id); n += 1) config.id = `${base.slice(0, 36)}-${n}`;
+      // a name nobody chose never lands on the one the Hugging Face token is sealed under
+      for (let n = 2; this.backends.get(config.id) || config.id === HUGGING_FACE; n += 1)
+        config.id = `${base.slice(0, 36)}-${n}`;
     }
+    if (config.id === HUGGING_FACE) throw reserved();
     if (this.backends.get(config.id))
       throw new HeldRefused(409, `a backend named ${config.id} is held already`);
     for (const m of config.models) {
