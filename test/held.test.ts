@@ -180,6 +180,44 @@ describe("the models Kvasir holds", () => {
       404,
     );
   });
+
+  it("are followed by a second Kvasir when another changed a backend's models, served again in its place (record 24)", async () => {
+    const rt = await runtime(["qwen", "gemma", "phi"]);
+    const first = await kvasir();
+    const second = await kvasir(first.dir);
+    const card = described({
+      id: "card",
+      baseUrl: `${rt.url}/v1`,
+      locality: "local",
+      models: ["qwen"],
+    }).config;
+    first.k.held.put(card, "test");
+    first.k.held.put(
+      described({ id: "other", baseUrl: `${rt.url}/v1`, locality: "local", models: ["phi"] }).config,
+      "test",
+    );
+    second.k.held.sync();
+    const handed: string[] = [];
+    second.k.held.onAdded = (b) =>
+      handed.push(`${b.config.id}:${b.config.models.map((m) => m.id).join(",")}`);
+    const models = described({ baseUrl: `${rt.url}/v1`, locality: "local", models: ["gemma"] }).config.models;
+    first.k.held.replace({ ...card, models }, "test");
+    expect(first.k.backends.get("card")?.config.models.map((m) => m.id)).toEqual(["gemma"]);
+    // a model another backend serves is not taken
+    expect(() => first.k.held.replace({ ...card, models: [{ ...models[0], id: "phi" }] }, "test")).toThrow(
+      /phi is served by other already/,
+    );
+    const { changed } = second.k.held.sync();
+    expect(changed.map((b) => b.config.id)).toEqual(["card"]);
+    expect(second.k.backends.get("card")?.config.models.map((m) => m.id)).toEqual(["gemma"]);
+    expect(handed).toEqual(["card:gemma"]);
+    expect(second.k.backends.list.filter((b) => !b.config.builtin).map((b) => b.config.id)).toEqual([
+      "card",
+      "other",
+    ]);
+    // nothing changed since, so nothing is handed on again
+    expect(second.k.held.sync()).toEqual({ added: [], changed: [], removed: [] });
+  });
 });
 
 describe("an admin's description of a backend", () => {

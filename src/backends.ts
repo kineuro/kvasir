@@ -223,6 +223,20 @@ export class Backends {
     return backend;
   }
 
+  /**
+   * A backend served in the place of the one with its id, the order kept: a held backend whose models changed
+   * (record 24). The one it replaces stops warming, and the streams already running on it finish.
+   */
+  swap(backend: Backend): void {
+    const at = this.list.findIndex((b) => b.config.id === backend.config.id);
+    if (at < 0) {
+      this.add(backend);
+      return;
+    }
+    const [replaced] = this.list.splice(at, 1, backend);
+    replaced.stop();
+  }
+
   get(id: string): Backend | undefined {
     return this.list.find((b) => b.config.id === id);
   }

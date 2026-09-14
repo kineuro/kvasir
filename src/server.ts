@@ -17,6 +17,7 @@ import { Ledger } from "./ledger.js";
 import { Lifecycle, LifecycleRefused, parseSource } from "./lifecycle.js";
 import { Local, type LocalOptions, LocalRefused } from "./local.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
+import { Runner, type RunnerOptions } from "./runtime.js";
 import { Store } from "./store.js";
 import { CHATGPT, type SubscriptionAuth, Subscriptions, SYSTEM } from "./subscriptions.js";
 import { measureOverhead, probeRuntime, runSuite } from "./suite.js";
@@ -37,8 +38,10 @@ export interface Kvasir {
   held: Held;
   /** Each person's own ChatGPT subscription, or the install's where nobody signs in (record 23). */
   subscriptions: Subscriptions;
-  /** Local models: downloaded by Kvasir into a location an admin can change, and served by the admin's own model server (record 23). */
+  /** Local models: downloaded by Kvasir into a location an admin can change (record 23), and started on the install's runtime where it runs one (record 24). */
   local: Local;
+  /** The runtime a GGUF download starts on, where kvasir.json names one; null otherwise (record 24). */
+  runner: Runner | null;
   policy: Policy;
   admissions: Admissions;
   /** The model lifecycle (Wave 5 §9.5): registered, admitted, promoted, retired. */
@@ -56,7 +59,7 @@ export interface Kvasir {
 
 export function build(
   config: Config,
-  options: { subscriptionAuth?: () => SubscriptionAuth; local?: LocalOptions } = {},
+  options: { subscriptionAuth?: () => SubscriptionAuth; local?: LocalOptions; runtime?: RunnerOptions } = {},
 ): Kvasir {
   const store = new Store(config.store);
   const backends = new Backends(config.admission);
@@ -67,7 +70,7 @@ export function build(
   const credentials = new Credentials(store, seal);
   const policy = new Policy(store, config.purposes, backends);
   // the models this database holds, served from the start; a purpose mapped to one let go returns to its default
-  const held = new Held(store, backends, credentials, (id) => policy.forget(id));
+  const held = new Held(store, backends, credentials, (id) => policy.forget(id), config.hostAlias);
   held.sync();
   // local models download into `models` beside the database until an admin sets a location
   const local = new Local(
@@ -77,6 +80,11 @@ export function build(
     resolve(dirname(config.store), "models"),
     options.local,
   );
+  // a GGUF download starts on the runtime kvasir.json names, where the install runs one (record 24)
+  const runner = config.local.runtime
+    ? new Runner(store, held, backends, credentials, local, config.local.runtime, options.runtime)
+    : null;
+  local.runner = runner;
   // ChatGPT through each person's own subscription: Kvasir's own backend, served beside the added ones (record 23)
   const subscriptions = new Subscriptions(
     store,
@@ -182,6 +190,7 @@ export function build(
     held,
     subscriptions,
     local,
+    runner,
     policy,
     admissions,
     lifecycle,
@@ -196,6 +205,7 @@ export function build(
       // stops with what it has, to carry on when Kvasir starts again
       held.unwatch();
       for (const b of backends.list) b.stop();
+      await runner?.close();
       await local.stop();
       await new Promise<void>((done) => server.close(() => done()));
       store.close();
@@ -408,8 +418,11 @@ async function route(
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "trying a backend is an admin's" } });
     try {
-      const d = described(JSON.parse((await readBody(req)) || "{}"), { modelsOptional: true });
-      json(res, 200, await tryBackend(d.config, d.key));
+      const d = described(JSON.parse((await readBody(req)) || "{}"), {
+        modelsOptional: true,
+        hostAlias: config.hostAlias,
+      });
+      json(res, 200, { ...(await tryBackend(d.config, d.key)), ...(d.note ? { note: d.note } : {}) });
     } catch (e) {
       heldError(res, e);
     }
@@ -418,7 +431,7 @@ async function route(
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "adding a backend is an admin's" } });
     try {
-      const { backend, tried } = await held.add(JSON.parse((await readBody(req)) || "{}"), who.subject);
+      const { backend, tried, note } = await held.add(JSON.parse((await readBody(req)) || "{}"), who.subject);
       json(res, 201, {
         backend: {
           id: backend.config.id,
@@ -426,6 +439,7 @@ async function route(
           models: backend.config.models.map((m) => m.id),
         },
         tried,
+        ...(note ? { note } : {}),
       });
     } catch (e) {
       heldError(res, e);
@@ -581,7 +595,7 @@ async function route(
     const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
     json(res, 200, { rows: ledger.rows(holds(who, "admin") ? null : who.subject, limit) });
   } else if (path === "/v1/local" || path.startsWith("/v1/local/")) {
-    // record 23: local models, downloaded by Kvasir and served by the admin's own model server
+    // record 23: local models downloaded by Kvasir; record 24: a GGUF download started on the install's runtime
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "local models are an admin's" } });
     await localDoor(req, res, path, who, local);
@@ -602,7 +616,8 @@ function lifecycleError(res: ServerResponse, e: unknown): void {
 /**
  * The doors of local models (record 23): the listing, the location, a lookup
  * that keeps nothing, a download queued, paused, resumed and removed, and the
- * Hugging Face token set and cleared, never shown. Every one is an admin's.
+ * Hugging Face token set and cleared, never shown; and a GGUF download started
+ * and stopped on the install's runtime (record 24). Every one is an admin's.
  */
 async function localDoor(
   req: IncomingMessage,
@@ -623,7 +638,7 @@ async function localDoor(
       throw new LocalRefused(400, "bad_request", "the body is a JSON object");
     return parsed as Record<string, unknown>;
   };
-  const model = /^\/v1\/local\/models\/(\d+)(\/pause|\/resume)?$/u.exec(path);
+  const model = /^\/v1\/local\/models\/(\d+)(\/pause|\/resume|\/start|\/stop)?$/u.exec(path);
   try {
     if (path === "/v1/local" && req.method === "GET") json(res, 200, local.status());
     else if (path === "/v1/local/location" && req.method === "PUT") {
@@ -642,7 +657,18 @@ async function localDoor(
       json(res, 200, local.pause(Number(model[1])));
     else if (model?.[2] === "/resume" && req.method === "POST")
       json(res, 200, local.resume(Number(model[1])));
-    else if (path === "/v1/local/token" && req.method === "PUT") {
+    else if (model && (model[2] === "/start" || model[2] === "/stop") && req.method === "POST") {
+      const runner = local.runner;
+      if (!runner)
+        throw new LocalRefused(
+          409,
+          "no_runtime",
+          "this install runs no runtime Kvasir starts models on: start a model server with one of the commands shown, then add it",
+        );
+      if (model[2] === "/start")
+        json(res, 202, await runner.start(Number(model[1]), who.subject, (await body()).file));
+      else json(res, 200, await runner.stop(Number(model[1])));
+    } else if (path === "/v1/local/token" && req.method === "PUT") {
       local.setToken((await body()).token);
       json(res, 200, { token: true, shown: "never" });
     } else if (path === "/v1/local/token" && req.method === "DELETE") {

@@ -2,11 +2,12 @@
 // Local models (record 23): Kvasir downloads a model from the Hugging Face Hub
 // into a location an admin can change, one file at a time, each file resumed
 // from what it already holds and checked against the sha256 the hub lists, and
-// lists every model with its size, its state and the commands a model server
-// runs it with. Kvasir runs no model: an admin starts their own model server on
-// a download and adds that server as any other. Two Kvasirs on one database
-// never download at once, because the one downloading holds a lease in the
-// database and renews it while it downloads.
+// lists every model with its size, its state and how it is served. Where the
+// install runs a runtime, a GGUF download starts on it (record 24,
+// src/runtime.ts); otherwise the listing gives the commands a model server runs
+// it with, and an admin adds that server as any other. Two Kvasirs on one
+// database never download at once, because the one downloading holds a lease in
+// the database and renews it while it downloads.
 
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -26,6 +27,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import type { Credentials } from "./credentials.js";
+import type { Run, Runner, RuntimeStatus } from "./runtime.js";
 import type { Store } from "./store.js";
 
 /** The credential the Hugging Face token is sealed under. */
@@ -113,6 +115,10 @@ export interface LocalRow {
   added_at: number;
   finished_at: number | null;
   serve: Serve[];
+  /** Whether it starts on the runtime: a finished GGUF download on an install with a runtime (record 24). */
+  startable: boolean;
+  /** Its run on the runtime, from its first start on; null before. */
+  run: Run | null;
 }
 
 /** What an admin asks for: a repository, and where they want them, a revision and the patterns of the files. */
@@ -375,6 +381,28 @@ function shellWord(path: string): string {
 }
 
 /**
+ * The GGUF files of a download a runtime loads: the first part of a split file
+ * standing for all its parts, in the order the download lists them, and the
+ * first vision projector, which goes with a model rather than being one.
+ */
+export function ggufOf(files: string[]): { models: string[]; mmproj: string | null } {
+  const models: string[] = [];
+  let mmproj: string | null = null;
+  for (const f of files) {
+    if (!/\.gguf$/iu.test(f)) continue;
+    const base = f.split("/").at(-1) ?? f;
+    if (/^mmproj/iu.test(base)) {
+      mmproj ??= f;
+      continue;
+    }
+    const part = /-(\d{5})-of-\d{5}\.gguf$/iu.exec(base);
+    if (part && Number(part[1]) !== 1) continue;
+    models.push(f);
+  }
+  return { models, mmproj };
+}
+
+/**
  * The commands a model server runs a download with, as words only. A GGUF
  * file is llama.cpp's and Ollama's, the first part of a split file standing
  * for all its parts and a vision projector left out; a folder with a
@@ -382,11 +410,7 @@ function shellWord(path: string): string {
  */
 export function serveCommands(dir: string, files: string[]): Serve[] {
   const out: Serve[] = [];
-  for (const f of files) {
-    if (!/\.gguf$/iu.test(f)) continue;
-    const base = f.split("/").at(-1) ?? f;
-    const part = /-(\d{5})-of-\d{5}\.gguf$/iu.exec(base);
-    if (/^mmproj/iu.test(base) || (part && Number(part[1]) !== 1)) continue;
+  for (const f of ggufOf(files).models) {
     const file = join(dir, f);
     out.push({ runtime: "llama.cpp", command: `llama-server -m ${shellWord(file)} --port 8080` });
     out.push({ runtime: "ollama", command: `FROM ${/[\s"]/u.test(file) ? JSON.stringify(file) : file}` });
@@ -504,6 +528,8 @@ export class Local {
   private running: Promise<boolean> | null = null;
   private current: { id: number; control: AbortController; done: Promise<void> } | null = null;
   private closing = false;
+  /** The runtime a GGUF download starts on, where the install runs one (record 24). */
+  runner: Runner | null = null;
 
   constructor(
     private readonly store: Store,
@@ -586,6 +612,19 @@ export class Local {
     return s;
   }
 
+  /** A model's folder, its state and the paths of its files, for the runtime that starts it (record 24). */
+  folder(id: number): { path: string; repo: string; state: LocalState; files: string[] } | null {
+    const s = this.stored(id);
+    return s
+      ? {
+          path: s.path,
+          repo: s.repo,
+          state: s.state,
+          files: (JSON.parse(s.files) as HubFile[]).map((f) => f.path),
+        }
+      : null;
+  }
+
   private rowOf(s: Stored): LocalRow {
     const files = JSON.parse(s.files) as HubFile[];
     return {
@@ -602,14 +641,22 @@ export class Local {
       added_by: s.added_by,
       added_at: s.added_at,
       finished_at: s.finished_at,
-      // the commands are shown once every file of the model is there
+      // the commands are shown once every file of the model is there, and a GGUF download's not where it starts on a runtime
       serve:
         s.state === "done"
           ? serveCommands(
               s.path,
               files.map((f) => f.path),
-            )
+            ).filter((c) => !this.runner || (c.runtime !== "llama.cpp" && c.runtime !== "ollama"))
           : [],
+      ...(this.runner
+        ? this.runner.view(
+            s.id,
+            s.path,
+            s.state,
+            files.map((f) => f.path),
+          )
+        : { startable: false, run: null }),
     };
   }
 
@@ -624,10 +671,25 @@ export class Local {
     );
   }
 
-  /** What the Kvasir page shows: where new downloads go and the room there, whether a token is set, and every model. */
-  status(): { location: string; free_bytes: number | null; token: boolean; models: LocalRow[] } {
+  /**
+   * What the Kvasir page shows: where new downloads go and the room there, whether a token is set, every model,
+   * and the runtime a GGUF download starts on, where the install runs one (record 24).
+   */
+  status(): {
+    location: string;
+    free_bytes: number | null;
+    token: boolean;
+    models: LocalRow[];
+    runtime: RuntimeStatus | null;
+  } {
     const location = this.location();
-    return { location, free_bytes: this.freeBytes(location), token: this.hasToken(), models: this.list() };
+    return {
+      location,
+      free_bytes: this.freeBytes(location),
+      token: this.hasToken(),
+      models: this.list(),
+      runtime: this.runner?.status() ?? null,
+    };
   }
 
   /** Refused where the free space is less than what is still to download and a gibibyte to spare. */
@@ -726,11 +788,18 @@ export class Local {
     return this.get(id) as LocalRow;
   }
 
-  /** A model gone: its row deleted, its download stopped, then its files and its folder deleted. */
+  /** A model gone: its row deleted, its download stopped, then its files and its folder deleted. A model started on the runtime is stopped first (record 24). */
   async remove(id: number): Promise<boolean> {
     const s = this.stored(id);
     if (!s) return false;
+    if (this.runner?.started(id))
+      throw new LocalRefused(
+        409,
+        "conflict",
+        `model ${id} is started on the runtime: stop it before removing it`,
+      );
     this.store.db.prepare("DELETE FROM local_model WHERE id = ?").run(id);
+    this.runner?.forget(id);
     const running = this.current;
     if (running?.id === id) {
       running.control.abort("removed");

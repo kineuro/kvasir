@@ -4,6 +4,16 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Kvasir starts the GGUF models it downloaded (record 24). Where kvasir.json names the install's runtime in `local.runtime`, llama.cpp's server in router mode that the install runs as a service with no model loaded (its address, key file, presets file, log, build and variant), a finished GGUF download starts with `POST /v1/local/models/{id}/start` or `kvasir local start --id N`, and stops with `POST /v1/local/models/{id}/stop` or `kvasir local stop --id N`. Kvasir writes the model's preset (an 8-bit KV cache, the model's own context and chat template, and a downloaded vision projector with it), has the runtime read its presets again and load the model, and follows it. Loaded, the model is held on the backend `llama-cpp`, warmed and admitted as any local model, with the context and slots the runtime settled on; failed, its row keeps the exit status and the last lines the runtime logged for it. One model runs at a time, so starting another stops the one running. What an admin started is kept in the database and loaded again when Kvasir or the runtime starts again, and a start from the command line is carried on by a Kvasir serving the database. A start is refused with `no_runtime`, `not_downloaded`, `not_gguf` or `runtime_unreachable`, and a started model is not removed until it is stopped. `GET /v1/local` shows the runtime (its build, whether it answers, and the model it serves) and, for each model, whether it starts and its run. A GGUF download on an install with a runtime no longer lists the llama.cpp and Ollama commands.
+- `hostAlias` in kvasir.json, for a Kvasir that runs in a container: a model server added or tried at a loopback address (127.0.0.1, localhost or [::1]) is reached by that name for the machine, the way setup writes such an address, and the answer says so.
+
+### Changed
+
+- While admission's gate holds, a local model that has not passed admission is no purpose's default. A purpose whose only local model is still in admission, or was refused by it, is refused with that model named.
+- A Kvasir serving the database follows a held backend whose models another Kvasir changed, as it follows one added or removed.
+
 ### Fixed
 
 - Kvasir no longer warms its own ChatGPT backend when it starts. With no subscription to warm it with, the try only left an error in its health. The line Kvasir starts with counts only the models an admin added.

@@ -3,8 +3,9 @@
 // the one database in the order it was added, its key sealed with the other
 // credentials, and none taken before every one of its models answered one
 // short request. A Kvasir started on the database serves them, and one that
-// is running while the command line adds or removes a backend follows within
-// seconds.
+// is running while the command line adds, changes or removes a backend
+// follows within seconds. The backend `llama-cpp` is Kvasir's own: the models
+// it started on the runtime the install runs (record 24, src/runtime.ts).
 
 import { type Backend, Backends } from "./backends.js";
 import { BACKEND_KINDS, type BackendConfig, type BackendKind, type ModelEntry } from "./config.js";
@@ -20,6 +21,9 @@ export const HELD_SCHEMA = `CREATE TABLE IF NOT EXISTS backend (
      added_by TEXT NOT NULL,
      added_at INTEGER NOT NULL
    )`;
+
+/** The backend Kvasir holds the models it started on the runtime under (record 24); an added backend takes another name. */
+export const RUNTIME_BACKEND = "llama-cpp";
 
 /** Why a backend was not taken, with the status a door answers and what each model said. */
 export class HeldRefused extends Error {
@@ -64,22 +68,46 @@ export function idFrom(model: string): string {
 }
 
 /**
+ * A loopback address as a Kvasir in a container dials it (record 24): by the
+ * name that container reaches the machine's own loopback by, the way setup
+ * writes a model server's address for it. Any other address is left as it is.
+ */
+export function throughHost(address: string, hostAlias: string | null): string {
+  if (!hostAlias) return address;
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    return address;
+  }
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return address;
+  url.hostname = hostAlias;
+  return url.toString().replace(/\/+$/u, "");
+}
+
+/**
  * An admin's description of a backend made whole: every field checked, defaults filled, the key apart.
- * A description for listing a server's models, before any is chosen, may name none.
+ * A description for listing a server's models, before any is chosen, may name none. Where Kvasir runs in a
+ * container, a server on the machine's loopback is dialled by the name the machine has there, and the note says so.
  */
 export function described(
   input: unknown,
-  opts: { modelsOptional?: boolean } = {},
-): { config: BackendConfig; key: string | null; named: boolean } {
+  opts: { modelsOptional?: boolean; hostAlias?: string | null } = {},
+): { config: BackendConfig; key: string | null; named: boolean; note: string | null } {
   const o = (input ?? {}) as Record<string, unknown>;
   const bad = (message: string) => new HeldRefused(400, message);
   const kind = String(o.kind ?? "openai-completions") as BackendKind;
   if (!BACKEND_KINDS.includes(kind)) throw bad(`kind is one of ${BACKEND_KINDS.join(", ")}`);
-  const baseUrl = String(o.baseUrl ?? o.base_url ?? "")
+  const given = String(o.baseUrl ?? o.base_url ?? "")
     .trim()
     .replace(/\/+$/u, "");
-  if (!/^https?:\/\/\S+$/u.test(baseUrl))
+  if (!/^https?:\/\/\S+$/u.test(given))
     throw bad("baseUrl: the server's address, starting with http:// or https://");
+  const baseUrl = throughHost(given, opts.hostAlias ?? null);
+  const note =
+    baseUrl === given
+      ? null
+      : `Kvasir runs in a container, where ${given} is the container's own address, so it reaches the server as ${baseUrl}`;
   const locality = o.locality;
   if (locality !== "local" && locality !== "remote")
     throw bad("locality: local, for a server in your own systems, or remote, for a provider");
@@ -138,7 +166,7 @@ export function described(
     config.classes = o.classes as BackendConfig["classes"];
   }
   const key = typeof o.key === "string" && o.key.trim() ? o.key.trim() : null;
-  return { config, key, named };
+  return { config, key, named, note };
 }
 
 /** How a failed request's words read: a key refused, no such model, nothing answering, or refused for now. */
@@ -235,7 +263,7 @@ export async function tryBackend(
 
 export class Held {
   private version = -1;
-  /** A backend just held, for a serving Kvasir to warm and admit; nothing where no server runs. */
+  /** A backend just held, or held again with other models, for a serving Kvasir to warm and admit; nothing where no server runs. */
   onAdded: (backend: Backend) => void = () => {};
 
   constructor(
@@ -244,6 +272,8 @@ export class Held {
     private readonly credentials: Credentials,
     /** What else names a backend let go: the policy rows that mapped a purpose to it. */
     private readonly forget: (backendId: string) => void = () => {},
+    /** Where Kvasir runs in a container: the name it reaches the machine's own loopback by (record 24). */
+    private readonly hostAlias: string | null = null,
   ) {
     store.db.exec(HELD_SCHEMA);
   }
@@ -275,26 +305,47 @@ export class Held {
     );
   }
 
-  /** A stored backend served: its key from the credentials at use, never kept. */
-  private serve(config: BackendConfig): Backend {
+  /** A stored backend made ready to serve: its key from the credentials at use, never kept. */
+  private made(config: BackendConfig): Backend {
     const backend = this.backends.make(config);
     const provider = config.provider ?? config.id;
     backend.credential = () => this.credentials.open(provider);
+    return backend;
+  }
+
+  /** A stored backend served. */
+  private serve(config: BackendConfig): Backend {
+    const backend = this.made(config);
     this.backends.add(backend);
     return backend;
   }
 
   /**
    * The database and the served list made the same: a backend another process
-   * added is served and handed to `onAdded`, one it removed is let go. Cheap
-   * when nothing changed, which SQLite's data version says.
+   * added is served and handed to `onAdded`, one whose models it changed is
+   * served again in its place and handed on too, and one it removed is let go.
+   * Cheap when nothing changed, which SQLite's data version says.
    */
-  sync(): { added: Backend[]; removed: string[] } {
+  sync(): { added: Backend[]; changed: Backend[]; removed: string[] } {
     const version = this.dataVersion();
-    if (version === this.version) return { added: [], removed: [] };
+    if (version === this.version) return { added: [], changed: [], removed: [] };
     this.version = version;
     const rows = this.rows();
     const added = rows.filter((r) => !this.backends.get(r.config.id)).map((r) => this.serve(r.config));
+    const changed = rows
+      .filter((r) => {
+        const served = this.backends.get(r.config.id);
+        return (
+          served !== undefined &&
+          !added.includes(served) &&
+          JSON.stringify(served.config) !== JSON.stringify(r.config)
+        );
+      })
+      .map((r) => {
+        const backend = this.made(r.config);
+        this.backends.swap(backend);
+        return backend;
+      });
     const kept = new Set(rows.map((r) => r.config.id));
     // Kvasir's own backends are never stored, so never let go for being absent from the rows
     const removed = this.backends.list
@@ -302,8 +353,8 @@ export class Held {
       .map((b) => b.config.id)
       .filter((id) => !kept.has(id));
     for (const id of removed) this.backends.remove(id);
-    for (const b of added) this.onAdded(b);
-    return { added, removed };
+    for (const b of [...added, ...changed]) this.onAdded(b);
+    return { added, changed, removed };
   }
 
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -357,21 +408,68 @@ export class Held {
     return this.serve(stored);
   }
 
+  /**
+   * A held backend's models changed in place (record 24), as the runtime's
+   * backend changes when a model starts or stops: stored, served again in its
+   * place with its order kept, and handed to `onAdded`, which warms and admits
+   * a serving Kvasir's; held anew where there is none. A model another backend
+   * serves is refused, as `put` refuses it.
+   */
+  replace(config: BackendConfig, by: string, key: string | null = null): Backend {
+    this.sync();
+    if (config.id === HUGGING_FACE) throw reserved();
+    if (!this.backends.get(config.id)) {
+      const backend = this.put(config, by, key);
+      this.onAdded(backend);
+      return backend;
+    }
+    for (const m of config.models) {
+      const served = this.backends.find(m.id);
+      if (served && served.backend.config.id !== config.id)
+        throw new HeldRefused(409, `${m.id} is served by ${served.backend.config.id} already`);
+    }
+    const stored: BackendConfig = { ...config, provider: config.id };
+    this.store.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.store.db
+        .prepare("UPDATE backend SET config = ? WHERE id = ?")
+        .run(JSON.stringify(stored), stored.id);
+      if (key) this.credentials.put(stored.id, key);
+      this.store.db.exec("COMMIT");
+    } catch (e) {
+      this.store.db.exec("ROLLBACK");
+      throw e;
+    }
+    const backend = this.made(stored);
+    this.backends.swap(backend);
+    this.onAdded(backend);
+    return backend;
+  }
+
   /** A backend an admin described, held only once every one of its models answered. */
   async add(
     input: unknown,
     by: string,
     opts: { timeoutMs?: number } = {},
-  ): Promise<{ backend: Backend; tried: Tried }> {
-    const { config, key, named } = described(input);
+  ): Promise<{ backend: Backend; tried: Tried; note: string | null }> {
+    const { config, key, named, note } = described(input, { hostAlias: this.hostAlias });
     this.sync();
     if (!named) {
       const base = config.id;
-      // a name nobody chose never lands on the one the Hugging Face token is sealed under
-      for (let n = 2; this.backends.get(config.id) || config.id === HUGGING_FACE; n += 1)
+      // a name nobody chose never lands on the one the Hugging Face token is sealed under, or on the runtime's
+      for (
+        let n = 2;
+        this.backends.get(config.id) || config.id === HUGGING_FACE || config.id === RUNTIME_BACKEND;
+        n += 1
+      )
         config.id = `${base.slice(0, 36)}-${n}`;
     }
     if (config.id === HUGGING_FACE) throw reserved();
+    if (config.id === RUNTIME_BACKEND)
+      throw new HeldRefused(
+        409,
+        `${RUNTIME_BACKEND} is the backend Kvasir holds the models it starts under; an added backend takes another name`,
+      );
     if (this.backends.get(config.id))
       throw new HeldRefused(409, `a backend named ${config.id} is held already`);
     for (const m of config.models) {
@@ -389,7 +487,7 @@ export class Held {
     }
     const backend = this.put(config, by, key);
     this.onAdded(backend);
-    return { backend, tried };
+    return { backend, tried, note };
   }
 
   /** A backend let go: its row, its key and the policy rows naming it go; its streams already running finish. */
