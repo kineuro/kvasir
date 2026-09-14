@@ -4,6 +4,8 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.3] - 2026-09-14
+
 ### Added
 
 - A backend's text is read for reasoning its model left inline, so a runtime that does not separate reasoning, or a model whose markers it does not know, still hands the client its thinking and its answer apart. Kvasir reads the markers of each family when they open the output: `<think>`, Gemma 4's `<|channel>thought`, gpt-oss's harmony channels, Mistral's `[THINK]`, Cohere's `<|START_THINKING|>`, Kimi K3's think channel and the namespaced think tags. It holds back the end of the text while that could still become a marker, never goes back into reasoning once the answer has begun, and drops the stop tokens a runtime leaves at the end. `inlineReasoning` on a backend says how its text is read: `markers`, the default; `open`, for a chat template that opens thinking in the prompt, so the output begins inside it; or `off`. Both doors carry the result: thinking events on `POST /v1/messages`, and `reasoning_content` on `POST /v1/chat/completions`.
