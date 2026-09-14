@@ -48,6 +48,13 @@ export interface BackendConfig {
    * `max_tokens` unless told otherwise. A client never sends any.
    */
   compat?: Record<string, unknown>;
+  /**
+   * How this backend's text is read for reasoning a model left inline (the chat,
+   * slice 9): "markers", the default, reads it from markers that open the output;
+   * "open" from the start of the output to a closing marker, for a chat template
+   * that opens thinking in the prompt; "off" not at all.
+   */
+  inlineReasoning?: import("./reasoning.js").InlineReasoning;
 }
 
 export interface Config {
@@ -84,6 +91,8 @@ export function parse(text: string): Config {
       throw new Error(`kvasir.json: backend ${b.id}: locality is local or remote`);
     b.concurrency = b.concurrency ?? 8;
     b.warmup = b.warmup ?? true;
+    if (b.inlineReasoning !== undefined && !["off", "markers", "open"].includes(b.inlineReasoning))
+      throw new Error(`kvasir.json: backend ${b.id}: inlineReasoning is off, markers or open`);
     for (const m of b.models ?? []) {
       if (ids.has(m.id)) throw new Error(`kvasir.json: model ${m.id} is listed twice`);
       ids.add(m.id);

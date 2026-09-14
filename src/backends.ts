@@ -8,6 +8,7 @@ import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-m
 import { stream as openaiStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { Admission } from "./admission.js";
 import { type BackendConfig, keyOf, type ModelEntry } from "./config.js";
+import { splitInline } from "./inline.js";
 
 export interface Health {
   /** No first token since start. */
@@ -105,7 +106,9 @@ export class Backend {
         this.config.kind === "anthropic-messages"
           ? anthropicStream(model as Model<"anthropic-messages">, context, common)
           : openaiStream(model as Model<"openai-completions">, context, common);
-      for await (const ev of events) {
+      // reasoning a model left inline leaves as thinking, never as the answer (the chat, slice 9)
+      const mode = this.config.inlineReasoning ?? "markers";
+      for await (const ev of mode === "off" ? events : splitInline(events, mode)) {
         if (
           this.health.warming &&
           (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta")
