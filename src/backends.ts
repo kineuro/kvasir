@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The backends: a fixed list of adapters, each a pi-ai api, the runtime key
-// held here, and the health rule of §8.5: a backend is warming until it has
-// produced a first token since Kvasir started.
+// The backends: a fixed list of adapters, each a pi-ai api, the key taken
+// from the credentials at use, and the health rule of §8.5: a backend is
+// warming until it has produced a first token since Kvasir started. The list
+// is the models Kvasir holds (src/held.ts), and it grows and shrinks as an
+// admin adds and removes them.
 
 import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as openaiStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { Admission } from "./admission.js";
-import { type BackendConfig, keyOf, type ModelEntry } from "./config.js";
+import type { BackendConfig, ModelEntry } from "./config.js";
 import { splitInline } from "./inline.js";
 
 export interface Health {
@@ -25,8 +27,7 @@ export const WARM_WAITS = [5_000, 10_000, 20_000, 40_000, 60_000];
 
 export class Backend {
   readonly config: BackendConfig;
-  private readonly key: string | undefined;
-  /** The credential store's answer for this backend's provider and the person streaming, at use, never kept (§8.4). */
+  /** The credential store's answer for this backend and the person streaming, at use, never kept (§8.4). */
   credential: ((subject?: string) => Promise<string | null> | string | null) | null = null;
   readonly health: Health;
   readonly admission: Admission;
@@ -39,7 +40,6 @@ export class Backend {
 
   constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000) {
     this.config = config;
-    this.key = keyOf(config);
     // the warm-up rule (§8.5) is a local runtime's; a remote provider is not warmed by us
     const warming = config.locality === "local";
     this.health = {
@@ -101,7 +101,7 @@ export class Backend {
     this.health.running += 1;
     try {
       const common = {
-        apiKey: (await this.credential?.(options.subject)) ?? this.key ?? "none",
+        apiKey: (await this.credential?.(options.subject)) ?? "none",
         temperature: options.temperature ?? this.config.defaults?.temperature,
         maxTokens: options.maxTokens,
         signal: options.signal,
@@ -183,17 +183,38 @@ export class Backend {
 }
 
 export class Backends {
-  readonly list: Backend[];
+  /** Served, in the order they were added: the first local one is the default a purpose goes to. */
+  readonly list: Backend[] = [];
   /** §8.6: a local model is not in the catalog until it has passed the suite. */
   readonly gate: boolean;
-  constructor(
-    configs: BackendConfig[],
-    admission?: { queue: number; waitCapSeconds: number; gate?: boolean },
-  ) {
-    this.list = configs.map(
-      (c) => new Backend(c, admission?.queue ?? 8, (admission?.waitCapSeconds ?? 60) * 1000),
-    );
+  private readonly queue: number;
+  private readonly waitCapMs: number;
+  constructor(admission?: { queue: number; waitCapSeconds: number; gate?: boolean }) {
+    this.queue = admission?.queue ?? 8;
+    this.waitCapMs = (admission?.waitCapSeconds ?? 60) * 1000;
     this.gate = admission?.gate ?? true;
+  }
+
+  /** A backend for a configuration, with the queue and the wait cap every backend here has. */
+  make(config: BackendConfig): Backend {
+    return new Backend(config, this.queue, this.waitCapMs);
+  }
+
+  add(backend: Backend): void {
+    this.list.push(backend);
+  }
+
+  /** A backend let go: its warm-up ends, and the streams already running finish. */
+  remove(id: string): Backend | undefined {
+    const at = this.list.findIndex((b) => b.config.id === id);
+    if (at < 0) return undefined;
+    const [backend] = this.list.splice(at, 1);
+    backend.stop();
+    return backend;
+  }
+
+  get(id: string): Backend | undefined {
+    return this.list.find((b) => b.config.id === id);
   }
 
   /** Whether a model is listed: a remote one always, a local one once admitted, unless the gate is off. */

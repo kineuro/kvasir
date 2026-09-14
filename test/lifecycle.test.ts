@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
 import { build, type Kvasir, listen } from "../src/server.js";
-import { entry, fakeRuntime, local } from "./fake.js";
+import { entry, fakeRuntime, hold, local } from "./fake.js";
 
 const closers: (() => Promise<void> | void)[] = [];
 afterAll(async () => {
@@ -33,10 +33,10 @@ async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> 
       sealKeyFile: join(dir, "kvasir.seal"),
       admission: { queue: 8, waitCapSeconds: 60, gate: false },
       purposes: [{ id: "assistant.title", app: "assistant", content: "catalog", kind: "background" }],
-      backends,
     }),
   );
   const k = build(config);
+  hold(k, backends);
   const url = await listen(k, "127.0.0.1:0");
   closers.push(() => k.close());
   return { k, url };

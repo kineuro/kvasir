@@ -127,6 +127,11 @@ export class Policy {
     return this.rows().find((r) => r.purpose === purpose);
   }
 
+  /** The rows that mapped a purpose to a backend now let go: those purposes go to their default again. */
+  forget(backendId: string): number {
+    return Number(this.store.db.prepare("DELETE FROM policy WHERE backend = ?").run(backendId).changes);
+  }
+
   /** The table as the desk's models page reads it: every purpose with its backend, default or set, and what opening it would need. */
   table() {
     const set = new Map(this.rows().map((r) => [r.purpose, r]));

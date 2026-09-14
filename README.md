@@ -8,7 +8,7 @@ It is part of [NILS](https://github.com/kineuro/nils). It is not a model host: i
 
 ## Install
 
-The NILS setup wizard installs Kvasir with the assistant, points it at the model you name, and makes the assistant's key:
+The NILS setup wizard installs Kvasir with the assistant, adds the model you name once it answers, and makes the assistant's key:
 
 ```sh
 curl -fsSL https://nils.kineuro.se/get | sh
@@ -19,8 +19,7 @@ curl -fsSL https://nils.kineuro.se/get | sh
 **[kineuro.se/nils/docs](https://kineuro.se/nils/docs/)**
 
 - [What the assistant is made of](https://kineuro.se/nils/docs/assistant/what-it-is/), and why a gateway at all
-- [The model and the gateway](https://kineuro.se/nils/docs/assistant/kvasir/): serving a model, putting Kvasir in front of it, and minting a key
-- [docs/reference.md](docs/reference.md): identity and keys, purposes and their policy, credentials, the admission suite and the model lifecycle
+- [The model and the gateway](https://kineuro.se/nils/docs/assistant/kvasir/): serving a model, adding it to Kvasir, and minting a key
 
 ## The parts of NILS
 
@@ -35,11 +34,12 @@ curl -fsSL https://nils.kineuro.se/get | sh
 
 ```sh
 npm ci && npm run build && npm test
-cp kvasir.example.json kvasir.json   # edit the backends
+cp kvasir.example.json kvasir.json
+node dist/main.js models add --url http://127.0.0.1:30000/v1 --locality local --model qwen38-27b --config kvasir.json
 node dist/main.js --config kvasir.json
 ```
 
-`src/` is the service, `test/` its tests against fake backends, and `kvasir.example.json` the configuration with every setting.
+`src/` is the service, `test/` its tests against fake backends, and `kvasir.example.json` the configuration with every setting. The models are not in it: Kvasir holds them in its database, and adds each one from the desk or with `kvasir models add` once it answers.
 
 ## License
 

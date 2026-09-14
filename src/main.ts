@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// `kvasir --config kvasir.json`: serve, warming every backend at start.
+// `kvasir --config kvasir.json`: serve the models this database holds, each
+// local one warmed until its first token. And the command line, on the same
+// database with no server bound: the models, the keys, admission and the
+// lifecycle.
 
+import { readFileSync } from "node:fs";
 import { read } from "./config.js";
-import { build, listen, VERSION } from "./server.js";
+import { described, HeldRefused, type Tried, tryBackend } from "./held.js";
+import { build, listen, ready, VERSION } from "./server.js";
 import { probeRuntime } from "./suite.js";
 
 const args = process.argv.slice(2);
@@ -16,12 +21,102 @@ const flag = (name: string): string | undefined => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
+/** Every value a repeated flag was given, in order. */
+const flags = (name: string): string[] =>
+  args.flatMap((a, i) => (a === name && args[i + 1] !== undefined ? [args[i + 1]] : []));
+const by = flag("--by") ?? `${process.env.USER ?? "operator"}@cli`;
 let config: ReturnType<typeof read>;
 try {
   config = read(path ?? "kvasir.json");
 } catch (e) {
   console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
   process.exit(2);
+}
+
+/** What each model said to its one short question, a line each. */
+function sayTried(tried: Tried): void {
+  if (tried.listed) console.log(`the server lists ${tried.listed.join(", ") || "no model"}`);
+  for (const m of tried.models) {
+    console.log(
+      `  ${m.id}: ${m.answered ? "answered" : `did not answer (${m.error?.kind}): ${m.error?.message}`}`,
+    );
+  }
+}
+
+// `kvasir models list | test | add | remove` (record 23): the models this
+// database holds. A model is added only once it answered one short request;
+// a Kvasir serving the database follows within seconds, warming and admitting
+// what was added and letting go what was removed.
+if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?? "")) {
+  const usage =
+    "kvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON]";
+  const k = build(config);
+  try {
+    if (args[1] === "list") {
+      for (const row of k.held.rows()) {
+        const c = row.config;
+        console.log(
+          `${c.id}  ${c.kind}  ${c.locality}  ${c.baseUrl}  ${c.models.map((m) => m.id).join(", ")}${k.credentials.has(c.id) ? "  with a key" : ""}  added by ${row.addedBy} at ${new Date(row.addedAt).toISOString()}`,
+        );
+      }
+    } else if (args[1] === "remove") {
+      const id = flag("--id");
+      if (!id) {
+        console.error("kvasir models remove --id NAME");
+        process.exit(2);
+      }
+      if (k.held.remove(id)) console.log(`removed ${id}`);
+      else {
+        console.error(`kvasir: no backend ${id}`);
+        process.exitCode = 1;
+      }
+    } else {
+      const keyFile = flag("--key-file");
+      const models = flags("--model");
+      // a test with no model lists what the server serves; an add names at least one
+      if (!flag("--url") || (args[1] === "add" && models.length === 0)) {
+        console.error(usage);
+        process.exit(2);
+      }
+      const input = {
+        id: flag("--id"),
+        kind: flag("--kind"),
+        baseUrl: flag("--url"),
+        locality: flag("--locality"),
+        key: keyFile ? readFileSync(keyFile, "utf8").trim() : undefined,
+        concurrency: flag("--concurrency"),
+        inlineReasoning: flag("--inline-reasoning"),
+        compat: flag("--compat") ? JSON.parse(flag("--compat") as string) : undefined,
+        defaults: flag("--temperature") ? { temperature: flag("--temperature") } : undefined,
+        models: models.map((id) => ({
+          id,
+          upstream: flag("--upstream"),
+          name: flag("--name"),
+          contextWindow: flag("--context"),
+          maxTokens: flag("--max-tokens"),
+          reasoning: args.includes("--reasoning"),
+        })),
+      };
+      if (args[1] === "test") {
+        const d = described(input, { modelsOptional: true });
+        const tried = await tryBackend(d.config, d.key);
+        sayTried(tried);
+        if (tried.models.some((m) => !m.answered)) process.exitCode = 1;
+      } else {
+        const { backend, tried } = await k.held.add(input, by);
+        sayTried(tried);
+        console.log(
+          `added ${backend.config.id}${backend.config.locality === "local" ? "; a Kvasir serving this database warms and admits it" : ""}`,
+        );
+      }
+    }
+  } catch (e) {
+    if (e instanceof HeldRefused && e.models.length > 0) sayTried({ listed: null, models: e.models });
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
+  }
+  await k.close();
+  process.exit(process.exitCode ?? 0);
 }
 
 // `kvasir keys mint --principal P --purposes a,b [--class catalog|rows|identifiers]`:
@@ -63,6 +158,31 @@ if (args[0] === "keys" && args[1] === "mint") {
   }
 }
 
+// `kvasir keys list | revoke --id ID`: the minted keys, never their secrets.
+if (args[0] === "keys" && (args[1] === "list" || args[1] === "revoke")) {
+  const k = build(config);
+  if (args[1] === "list") {
+    for (const key of k.keys.list()) {
+      console.log(
+        `${key.id}  ${key.principal}  ${key.purposes.join(",") || "no purpose"}  ${key.maxClass}${key.expiresAt ? `  expires ${new Date(key.expiresAt).toISOString()}` : ""}`,
+      );
+    }
+  } else {
+    const id = flag("--id");
+    if (!id) {
+      console.error("kvasir keys revoke --id ID");
+      process.exit(2);
+    }
+    if (k.keys.revoke(id)) console.log(`revoked ${id}`);
+    else {
+      console.error(`kvasir: no key ${id}`);
+      process.exitCode = 1;
+    }
+  }
+  await k.close();
+  process.exit(process.exitCode ?? 0);
+}
+
 // `kvasir admission list|run` (§8.6): the suite from the command line, on
 // the same database, with no server bound but the process's own door for
 // the overhead measurement.
@@ -83,7 +203,7 @@ if (args[0] === "admission") {
   if (args[1] === "run") {
     const backend = flag("--backend");
     if (!backend) {
-      console.error("kvasir admission run --backend ID [--model ID] [--overhead] [--streams N] [--rounds N]");
+      console.error("kvasir admission run --backend ID [--model ID] [--overhead] [--json]");
       process.exit(2);
     }
     if (args.includes("--overhead")) await listen(k, "127.0.0.1:0");
@@ -114,7 +234,6 @@ if (args[0] === "admission") {
 // the lifecycle from the command line, on the same database, as the doors do.
 if (args[0] === "models" && args[1] === "lifecycle") {
   const k = build(config);
-  const by = flag("--by") ?? `${process.env.USER ?? "operator"}@cli`;
   const verb = args[2];
   const idOf = () => {
     const id = Number(flag("--id"));
@@ -190,11 +309,14 @@ if (args[0] === "models" && args[1] === "lifecycle") {
 }
 
 const k = build(config);
+// a backend added while this serves, from the desk or the command line, is admitted and warmed here
+k.held.onAdded = (backend) => void ready(k, backend);
 // the admitted sets from the records, against the runtime each backend reports now (§8.6)
 await k.admissions.load(k.backends, (b) => probeRuntime(b));
 const address = await listen(k, config.bind);
+const held = k.backends.list.length;
 console.log(
-  `kvasir ${VERSION} serving ${address} as ${config.origin}, ${config.backends.length} backend(s), warming`,
+  `kvasir ${VERSION} serving ${address} as ${config.origin}, ${held === 0 ? "with no model yet: an admin adds one from the desk or with kvasir models add" : `${held} backend(s), warming`}`,
 );
 // long-lived and warmed, never on demand (§8.5): one try at start, then again until a first token
 await Promise.all(k.backends.list.map((b) => b.warmup()));
@@ -209,6 +331,9 @@ for (const b of k.backends.list) {
   );
   if (b.health.warming) void b.keepWarm(undefined, (line) => console.log(`  ${line}`));
 }
-process.on("SIGINT", () => {
-  k.close().then(() => process.exit(0));
-});
+k.held.watch();
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    k.close().then(() => process.exit(0));
+  });
+}

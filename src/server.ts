@@ -2,21 +2,24 @@
 // The one process: the router, identity, the keys, the ledger, the metrics.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import { Admissions } from "./admission-records.js";
 import { Auth, holds, type Principal, Refused } from "./auth.js";
-import { Backends } from "./backends.js";
+import { type Backend, Backends } from "./backends.js";
 import { type Config, pepper } from "./config.js";
 import { Credentials, openSeal } from "./credentials.js";
 import { chatCompletions, json, piMessages, readBody } from "./doors.js";
+import { described, Held, HeldRefused, tryBackend } from "./held.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
 import { Lifecycle, LifecycleRefused, parseSource } from "./lifecycle.js";
-import { Personal } from "./personal.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Store } from "./store.js";
-import { measureOverhead, runSuite } from "./suite.js";
+import { measureOverhead, probeRuntime, runSuite } from "./suite.js";
 
-export const VERSION = "1.0.0-alpha.2";
+/** Kvasir's version, as its package names it. */
+export const VERSION: string = (createRequire(import.meta.url)("../package.json") as { version: string })
+  .version;
 
 export interface Kvasir {
   config: Config;
@@ -26,7 +29,8 @@ export interface Kvasir {
   ledger: Ledger;
   auth: Auth;
   credentials: Credentials;
-  personal: Personal;
+  /** The models Kvasir holds: tried, added, served and removed (record 23). */
+  held: Held;
   policy: Policy;
   admissions: Admissions;
   /** The model lifecycle (Wave 5 §9.5): registered, admitted, promoted, retired. */
@@ -43,23 +47,16 @@ export interface Kvasir {
 }
 
 export function build(config: Config): Kvasir {
-  const backends = new Backends(config.backends, config.admission);
   const store = new Store(config.store);
+  const backends = new Backends(config.admission);
   const keys = new Keys(store, pepper(config.pepperFile));
   const ledger = new Ledger(store);
   const auth = new Auth(config.auth, keys);
-  const seal = openSeal(config.sealKeyFile, store, (line) => console.error(`kvasir: ${line}`));
-  const credentials = new Credentials(store, seal);
-  const personal = new Personal(store, seal, config.oauth, config.origin);
-  for (const b of backends.list) {
-    if (b.config.provider) {
-      const provider = b.config.provider;
-      // the person's own credential first (a brought key or a live grant), else the organisation's (§8.4)
-      b.credential = async (subject) =>
-        (subject ? await personal.open(subject, provider) : null) ?? credentials.open(provider);
-    }
-  }
+  const credentials = new Credentials(store, openSeal(config.sealKeyFile));
   const policy = new Policy(store, config.purposes, backends);
+  // the models this database holds, served from the start; a purpose mapped to one let go returns to its default
+  const held = new Held(store, backends, credentials, (id) => policy.forget(id));
+  held.sync();
   const admissions = new Admissions(store);
   const lifecycle = new Lifecycle(store);
   // a promoted candidate is the model the purposes route to on its backend
@@ -109,23 +106,6 @@ export function build(config: Config): Kvasir {
       res.end(ledger.metrics());
       return;
     }
-    // the OAuth callback (C5) arrives from the provider through the person's browser with no bearer: the state is its identity
-    if (path === "/v1/personal/oauth/callback" && req.method === "GET") {
-      const code = url.searchParams.get("code");
-      const state = url.searchParams.get("state");
-      if (!code || !state)
-        return json(res, 400, { error: { code: "bad_request", message: "code and state" } });
-      try {
-        const done = await personal.callback(code, state, null);
-        res.writeHead(303, {
-          location: `${done.return_to}${done.return_to.includes("#") ? "" : "#settings"}`,
-        });
-        res.end();
-      } catch (e) {
-        json(res, 400, { error: { code: "oauth", message: e instanceof Error ? e.message : String(e) } });
-      }
-      return;
-    }
     let who: Principal;
     try {
       who = await auth.principal(req);
@@ -145,7 +125,7 @@ export function build(config: Config): Kvasir {
         keys,
         ledger,
         credentials,
-        personal,
+        held,
         policy,
         admissions,
         lifecycle,
@@ -166,7 +146,7 @@ export function build(config: Config): Kvasir {
     ledger,
     auth,
     credentials,
-    personal,
+    held,
     policy,
     admissions,
     lifecycle,
@@ -178,7 +158,8 @@ export function build(config: Config): Kvasir {
     },
     close: () =>
       new Promise((resolve) => {
-        // a warm-up still being tried ends with the server
+        // a warm-up still being tried, and the following of the database, end with the server
+        held.unwatch();
         for (const b of backends.list) b.stop();
         server.close(() => {
           store.close();
@@ -251,14 +232,14 @@ async function route(
     keys: Keys;
     ledger: Ledger;
     credentials: Credentials;
-    personal: Personal;
+    held: Held;
     policy: Policy;
     admissions: Admissions;
     lifecycle: Lifecycle;
     admit: Kvasir["admit"];
   },
 ): Promise<void> {
-  const { config, backends, keys, ledger, credentials, personal, policy, admissions, lifecycle, admit } = k;
+  const { config, backends, keys, ledger, credentials, held, policy, admissions, lifecycle, admit } = k;
   if (path === "/v1/config" && req.method === "GET") {
     json(res, 200, { ...backends.catalog(config.origin), kvasir: { version: VERSION } });
   } else if (path === "/v1/models" && req.method === "GET") {
@@ -343,17 +324,65 @@ async function route(
       throw e;
     }
   } else if (path === "/v1/backends" && req.method === "GET") {
+    held.sync();
+    const admin = holds(who, "admin");
     json(res, 200, {
       backends: backends.list.map((b) => ({
         id: b.config.id,
         kind: b.config.kind,
         locality: b.config.locality,
+        // where a backend is, and who added it, is an admin's to see
+        ...(admin ? { base_url: b.config.baseUrl, ...held.addedOf(b.config.id) } : {}),
         provider: b.config.provider ?? null,
         credential: b.config.provider ? credentials.has(b.config.provider) : null,
         models: b.config.models.map((m) => m.id),
+        entries: b.config.models.map((m) => ({
+          id: m.id,
+          name: m.name,
+          reasoning: m.reasoning,
+          context_window: m.contextWindow,
+          max_tokens: m.maxTokens,
+          admitted: b.config.locality === "remote" ? null : b.admitted.has(m.id),
+        })),
+        concurrency: b.config.concurrency,
         health: { ...b.health, queued: b.admission.queued },
       })),
     });
+  } else if (path === "/v1/backends/test" && req.method === "POST") {
+    // record 23: each model asked one short question, and nothing kept; with none named, only what the server lists
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "trying a backend is an admin's" } });
+    try {
+      const d = described(JSON.parse((await readBody(req)) || "{}"), { modelsOptional: true });
+      json(res, 200, await tryBackend(d.config, d.key));
+    } catch (e) {
+      heldError(res, e);
+    }
+  } else if (path === "/v1/backends" && req.method === "POST") {
+    // record 23: a backend is held only once every one of its models answered
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "adding a backend is an admin's" } });
+    try {
+      const { backend, tried } = await held.add(JSON.parse((await readBody(req)) || "{}"), who.subject);
+      json(res, 201, {
+        backend: {
+          id: backend.config.id,
+          locality: backend.config.locality,
+          models: backend.config.models.map((m) => m.id),
+        },
+        tried,
+      });
+    } catch (e) {
+      heldError(res, e);
+    }
+  } else if (path.startsWith("/v1/backends/") && req.method === "DELETE") {
+    if (!holds(who, "admin"))
+      return json(res, 403, { error: { code: "no_role", message: "removing a backend is an admin's" } });
+    const id = decodeURIComponent(path.slice("/v1/backends/".length));
+    if (held.remove(id)) {
+      res.writeHead(204);
+      res.end();
+    } else json(res, 404, { error: { code: "no_such_backend", message: `no backend ${id}` } });
   } else if (path.startsWith("/v1/credentials/") && (req.method === "PUT" || req.method === "DELETE")) {
     if (!holds(who, "admin"))
       return json(res, 403, { error: { code: "no_role", message: "the credentials are an admin's" } });
@@ -368,52 +397,6 @@ async function route(
       return json(res, 400, { error: { code: "bad_request", message: "secret: the provider's key" } });
     credentials.put(provider, body.secret);
     json(res, 200, { provider, stored: true, shown: "never" });
-  } else if (path === "/v1/personal" && req.method === "GET") {
-    // C5: what this person holds per provider, and whether a personal source is offered or absent by policy
-    json(res, 200, {
-      subject: who.subject,
-      redirect: personal.redirect(),
-      providers: personal.status(who.subject),
-    });
-  } else if (path.startsWith("/v1/personal/keys/") && (req.method === "PUT" || req.method === "DELETE")) {
-    if (who.kind !== "person")
-      return json(res, 403, {
-        error: {
-          code: "no_role",
-          message: "a brought key is a person's; a machine or a minted key holds none",
-        },
-      });
-    const provider = decodeURIComponent(path.slice("/v1/personal/keys/".length));
-    if (req.method === "DELETE") {
-      res.writeHead(personal.deleteKey(who.subject, provider) ? 204 : 404);
-      res.end();
-      return;
-    }
-    const body = JSON.parse(await readBody(req));
-    if (typeof body.secret !== "string" || body.secret.length < 8)
-      return json(res, 400, { error: { code: "bad_request", message: "secret: the provider's key" } });
-    personal.putKey(who.subject, provider, body.secret);
-    json(res, 200, { provider, stored: true, shown: "never" });
-  } else if (path.startsWith("/v1/personal/oauth/") && path.endsWith("/start") && req.method === "POST") {
-    if (who.kind !== "person")
-      return json(res, 403, { error: { code: "no_role", message: "an OAuth grant is a person's" } });
-    const provider = decodeURIComponent(path.slice("/v1/personal/oauth/".length, -"/start".length));
-    const body = JSON.parse(await readBody(req));
-    try {
-      json(
-        res,
-        200,
-        personal.start(who.subject, provider, String(body.session ?? ""), String(body.return_to ?? "")),
-      );
-    } catch (e) {
-      json(res, 400, { error: { code: "oauth", message: e instanceof Error ? e.message : String(e) } });
-    }
-  } else if (path.startsWith("/v1/personal/oauth/") && req.method === "DELETE") {
-    if (who.kind !== "person")
-      return json(res, 403, { error: { code: "no_role", message: "an OAuth grant is a person's" } });
-    const provider = decodeURIComponent(path.slice("/v1/personal/oauth/".length));
-    res.writeHead(personal.revoke(who.subject, provider) ? 204 : 404);
-    res.end();
   } else if (path === "/v1/admission" && req.method === "GET") {
     json(res, 200, {
       records: admissions.list(Math.min(500, Number(url.searchParams.get("limit") ?? 100) || 100)),
@@ -508,6 +491,38 @@ function lifecycleError(res: ServerResponse, e: unknown): void {
     json(res, e.status, { error: { code: "lifecycle", message: e.message } });
   else
     json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
+}
+
+function heldError(res: ServerResponse, e: unknown): void {
+  if (e instanceof HeldRefused)
+    json(res, e.status, { error: { code: "backend", message: e.message, models: e.models } });
+  else
+    json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
+}
+
+/**
+ * A backend just held, made ready where Kvasir serves (§8.5, §8.6): its
+ * admitted set read from the records for the runtime it reports now; then a
+ * local one warmed until its first token and, where a model has no passing
+ * record, run through admission. What happens is said on the log.
+ */
+export async function ready(
+  k: Kvasir,
+  backend: Backend,
+  say: (line: string) => void = (line) => console.log(line),
+): Promise<void> {
+  if (backend.config.locality === "remote") return;
+  await k.admissions.loadOne(backend, (b) => probeRuntime(b));
+  await backend.warmup();
+  if (backend.health.warming) void backend.keepWarm(undefined, (line) => say(`  ${line}`));
+  if (backend.config.models.every((m) => backend.admitted.has(m.id))) return;
+  try {
+    for (const r of await k.admit(backend.config.id)) {
+      say(`  ${r.backend}/${r.model}: ${r.passed ? "admitted" : "refused by admission"}`);
+    }
+  } catch (e) {
+    say(`  ${backend.config.id}: admission did not run: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 export function listen(k: Kvasir, bind: string): Promise<string> {
