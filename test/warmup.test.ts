@@ -53,6 +53,8 @@ describe("the warm-up", () => {
     await new Promise((r) => setTimeout(r, 60));
     b.stop();
     await trying;
+    // a try already on its way when Kvasir closed can still reach the runtime; none starts after it
+    await new Promise((r) => setTimeout(r, 50));
     const asked = rt.asked();
     expect(asked).toBeGreaterThan(0);
     await new Promise((r) => setTimeout(r, 40));
