@@ -665,9 +665,10 @@ async function localDoor(
           "no_runtime",
           "this install runs no runtime Kvasir starts models on: start a model server with one of the commands shown, then add it",
         );
-      if (model[2] === "/start")
-        json(res, 202, await runner.start(Number(model[1]), who.subject, (await body()).file));
-      else json(res, 200, await runner.stop(Number(model[1])));
+      if (model[2] === "/start") {
+        const asked = await body();
+        json(res, 202, await runner.start(Number(model[1]), who.subject, asked.file, asked.context));
+      } else json(res, 200, await runner.stop(Number(model[1])));
     } else if (path === "/v1/local/token" && req.method === "PUT") {
       local.setToken((await body()).token);
       json(res, 200, { token: true, shown: "never" });
