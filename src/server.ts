@@ -5,12 +5,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { Admissions } from "./admission-records.js";
-import { Auth, holds, type Principal, Refused } from "./auth.js";
+import { Auth, type Grant, holds, type Principal, Refused } from "./auth.js";
 import { type Backend, Backends } from "./backends.js";
 import { chatgptAuth, chatgptBackend, chatgptModels } from "./chatgpt.js";
 import { type Config, pepper } from "./config.js";
 import { Credentials, openSeal } from "./credentials.js";
-import { chatCompletions, json, piMessages, readBody } from "./doors.js";
+import { chatCompletions, json, piMessages, readBody, type Whose } from "./doors.js";
 import { described, Held, HeldRefused, tryBackend } from "./held.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
@@ -156,7 +156,7 @@ export function build(
     } catch (e) {
       if (e instanceof Refused) {
         json(res, e.status, {
-          error: { code: e.status === 401 ? "unauthenticated" : "no_role", message: e.message },
+          error: { code: e.status === 401 ? "unauthenticated" : "no_grant", message: e.message },
         });
         return;
       }
@@ -317,20 +317,18 @@ async function route(
       .models.map((m) => ({ id: m.id, object: "model", owned_by: m.backend }));
     json(res, 200, { object: "list", data: models });
   } else if (path === "/v1/messages" && req.method === "POST") {
-    const subject = await streamSubject(req, res, who, auth, config);
-    if (subject !== null)
-      await piMessages(req, res, backends, who, ledger, policy, subject, { keepAliveMs: k.keepAliveMs });
+    const whose = await streamSubject(req, res, who, auth, config);
+    if (whose !== null)
+      await piMessages(req, res, backends, who, ledger, policy, whose, { keepAliveMs: k.keepAliveMs });
   } else if (path === "/v1/chat/completions" && req.method === "POST") {
-    const subject = await streamSubject(req, res, who, auth, config);
-    if (subject !== null)
-      await chatCompletions(req, res, backends, who, ledger, policy, subject, { keepAliveMs: k.keepAliveMs });
+    const whose = await streamSubject(req, res, who, auth, config);
+    if (whose !== null)
+      await chatCompletions(req, res, backends, who, ledger, policy, whose, { keepAliveMs: k.keepAliveMs });
   } else if (path === "/v1/keys" && req.method === "GET") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "the keys are an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the keys need kvasir:work");
     json(res, 200, { keys: keys.list() });
   } else if (path === "/v1/keys" && req.method === "POST") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "minting is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "minting a key needs kvasir:work");
     const body = JSON.parse(await readBody(req));
     const purposes: string[] = Array.isArray(body.purposes)
       ? body.purposes.filter((p: unknown) => typeof p === "string")
@@ -351,8 +349,7 @@ async function route(
       shown: "once",
     });
   } else if (path.startsWith("/v1/keys/") && req.method === "DELETE") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "revoking is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "revoking a key needs kvasir:work");
     const id = path.slice("/v1/keys/".length);
     if (keys.revoke(id)) {
       res.writeHead(204);
@@ -369,7 +366,7 @@ async function route(
         pin: typeof body.pin === "string" ? body.pin : null,
         bumped,
         keyClass: who.key?.maxClass,
-        subject: config.auth.mode === "off" ? SYSTEM : who.subject,
+        subject: subscribing(who, config),
       });
       json(res, 200, g);
     } catch (e) {
@@ -380,8 +377,7 @@ async function route(
   } else if (path === "/v1/purposes" && req.method === "GET") {
     json(res, 200, { purposes: policy.table() });
   } else if (path.startsWith("/v1/purposes/") && path.endsWith("/policy") && req.method === "PUT") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "the policy table is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the policy table needs kvasir:work");
     const id = path.slice("/v1/purposes/".length, -"/policy".length);
     const body = JSON.parse(await readBody(req));
     try {
@@ -399,14 +395,14 @@ async function route(
     }
   } else if (path === "/v1/backends" && req.method === "GET") {
     held.sync();
-    const admin = holds(who, "admin");
+    const work = holds(who, "kvasir:work");
     json(res, 200, {
       backends: backends.list.map((b) => ({
         id: b.config.id,
         kind: b.config.kind,
         locality: b.config.locality,
-        // where a backend is, and who added it, is an admin's to see
-        ...(admin ? { base_url: b.config.baseUrl, ...held.addedOf(b.config.id) } : {}),
+        // where a backend is, and who added it, is for kvasir:work to see
+        ...(work ? { base_url: b.config.baseUrl, ...held.addedOf(b.config.id) } : {}),
         provider: b.config.provider ?? null,
         credential: b.config.provider ? credentials.has(b.config.provider) : null,
         models: b.config.models.map((m) => m.id),
@@ -425,8 +421,7 @@ async function route(
     });
   } else if (path === "/v1/backends/test" && req.method === "POST") {
     // record 23: each model asked one short question, and nothing kept; with none named, only what the server lists
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "trying a backend is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "trying a backend needs kvasir:work");
     try {
       const d = described(JSON.parse((await readBody(req)) || "{}"), {
         modelsOptional: true,
@@ -438,8 +433,7 @@ async function route(
     }
   } else if (path === "/v1/backends" && req.method === "POST") {
     // record 23: a backend is held only once every one of its models answered
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "adding a backend is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "adding a backend needs kvasir:work");
     try {
       const { backend, tried, note } = await held.add(JSON.parse((await readBody(req)) || "{}"), who.subject);
       json(res, 201, {
@@ -455,16 +449,14 @@ async function route(
       heldError(res, e);
     }
   } else if (path.startsWith("/v1/backends/") && req.method === "DELETE") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "removing a backend is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "removing a backend needs kvasir:work");
     const id = decodeURIComponent(path.slice("/v1/backends/".length));
     if (held.remove(id)) {
       res.writeHead(204);
       res.end();
     } else json(res, 404, { error: { code: "no_such_backend", message: `no backend ${id}` } });
   } else if (path.startsWith("/v1/credentials/") && (req.method === "PUT" || req.method === "DELETE")) {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "the credentials are an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the credentials need kvasir:work");
     const provider = path.slice("/v1/credentials/".length);
     if (req.method === "DELETE") {
       res.writeHead(credentials.delete(provider) ? 204 : 404);
@@ -477,15 +469,15 @@ async function route(
     credentials.put(provider, body.secret);
     json(res, 200, { provider, stored: true, shown: "never" });
   } else if (path === "/v1/subscriptions" && req.method === "GET") {
-    // record 23: a person's own subscription, or the install's where nobody signs in
+    // record 23: a person's own subscription, or the install's where nobody signs in; its status is the person's
     const whose = subscriberOf(who, config);
-    if (!whose)
-      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    if (!whose) return notAPerson(res);
     json(res, 200, { subscriptions: [subscriptions.status(whose.subject, whose.for)] });
   } else if (path === `/v1/subscriptions/${CHATGPT}/sign-in` && req.method === "POST") {
+    // record 25: starting a sign-in, and choosing the model, need assistant:use and kvasir:see
     const whose = subscriberOf(who, config);
-    if (!whose)
-      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    if (!whose) return notAPerson(res);
+    if (!holds(who, ...SUBSCRIBES)) return noGrant(res, SUBSCRIBES, SUBSCRIBES_NEEDS);
     try {
       const waiting = await subscriptions.signIn(whose.subject);
       json(res, 200, {
@@ -495,17 +487,14 @@ async function route(
         expires_at: waiting.expiresAt,
       });
     } catch (e) {
-      json(res, 502, {
-        error: {
-          code: "sign_in",
-          message: `ChatGPT did not start the sign-in: ${e instanceof Error ? e.message : String(e)}`,
-        },
-      });
+      const why = e instanceof Error ? e.message : String(e);
+      console.error(`kvasir: ChatGPT did not start the sign-in for ${whose.subject}: ${why}`);
+      json(res, 502, { error: { code: "sign_in", message: `ChatGPT did not start the sign-in: ${why}` } });
     }
   } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "PUT") {
     const whose = subscriberOf(who, config);
-    if (!whose)
-      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    if (!whose) return notAPerson(res);
+    if (!holds(who, ...SUBSCRIBES)) return noGrant(res, SUBSCRIBES, SUBSCRIBES_NEEDS);
     const body = JSON.parse((await readBody(req)) || "{}");
     try {
       subscriptions.choose(whose.subject, String(body.model ?? ""));
@@ -514,9 +503,9 @@ async function route(
       json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
     }
   } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "DELETE") {
+    // signing out needs only the person
     const whose = subscriberOf(who, config);
-    if (!whose)
-      return json(res, 403, { error: { code: "no_role", message: "a subscription is a person's" } });
+    if (!whose) return notAPerson(res);
     res.writeHead(subscriptions.signOut(whose.subject) ? 204 : 404);
     res.end();
   } else if (path === "/v1/admission" && req.method === "GET") {
@@ -524,8 +513,7 @@ async function route(
       records: admissions.list(Math.min(500, Number(url.searchParams.get("limit") ?? 100) || 100)),
     });
   } else if (path === "/v1/admission/run" && req.method === "POST") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "admission is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "admission needs kvasir:work");
     const body = JSON.parse(await readBody(req));
     try {
       const records = await admit(
@@ -550,8 +538,7 @@ async function route(
         .map((b) => ({ backend: b.config.id, model: lifecycle.promoted(b.config.id) })),
     });
   } else if (path === "/v1/models/lifecycle" && req.method === "POST") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "the lifecycle is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the lifecycle needs kvasir:work");
     const body = JSON.parse(await readBody(req));
     try {
       const backend = String(body.backend ?? "");
@@ -571,8 +558,7 @@ async function route(
       lifecycleError(res, e);
     }
   } else if (path.startsWith("/v1/models/lifecycle/") && req.method === "POST") {
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "the lifecycle is an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the lifecycle needs kvasir:work");
     const [idText, verb] = path.slice("/v1/models/lifecycle/".length).split("/");
     const id = Number(idText);
     const body = JSON.parse((await readBody(req)) || "{}");
@@ -603,11 +589,11 @@ async function route(
     }
   } else if (path === "/v1/ledger" && req.method === "GET") {
     const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
-    json(res, 200, { rows: ledger.rows(holds(who, "admin") ? null : who.subject, limit) });
+    // every row for kvasir:work, and one's own rows for anyone else
+    json(res, 200, { rows: ledger.rows(holds(who, "kvasir:work") ? null : who.subject, limit) });
   } else if (path === "/v1/local" || path.startsWith("/v1/local/")) {
     // record 23: local models downloaded by Kvasir; record 24: a GGUF download started on the install's runtime
-    if (!holds(who, "admin"))
-      return json(res, 403, { error: { code: "no_role", message: "local models are an admin's" } });
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "local models need kvasir:work");
     await localDoor(req, res, path, who, local);
   } else {
     json(res, 404, {
@@ -627,7 +613,7 @@ function lifecycleError(res: ServerResponse, e: unknown): void {
  * The doors of local models (record 23): the listing, the location, a lookup
  * that keeps nothing, a download queued, paused, resumed and removed, and the
  * Hugging Face token set and cleared, never shown; and a GGUF download started
- * and stopped on the install's runtime (record 24). Every one is an admin's.
+ * and stopped on the install's runtime (record 24). Every one needs kvasir:work.
  */
 async function localDoor(
   req: IncomingMessage,
@@ -700,7 +686,9 @@ async function localDoor(
  * person calling with their own token, theirs; an app's key calling for a
  * person, that person's, named in `x-kvasir-person` with their own token and
  * verified. A person token that does not verify is refused rather than
- * streamed as the app.
+ * streamed as the app. The person's subscription answers the stream only
+ * while they hold assistant:use and kvasir:see (record 25); otherwise the
+ * stream goes as a signed-out person's does.
  */
 async function streamSubject(
   req: IncomingMessage,
@@ -708,12 +696,13 @@ async function streamSubject(
   who: Principal,
   auth: Auth,
   config: Config,
-): Promise<string | null> {
-  if (config.auth.mode === "off") return SYSTEM;
+): Promise<Whose | null> {
+  if (config.auth.mode === "off") return { subject: SYSTEM, subscriber: SYSTEM };
   const token = String(req.headers["x-kvasir-person"] ?? "").trim();
-  if (!token || who.kind === "person") return who.subject;
+  if (!token || who.kind === "person") return { subject: who.subject, subscriber: subscribing(who, config) };
   try {
-    return (await auth.person(token)).subject;
+    const person = await auth.person(token);
+    return { subject: person.subject, subscriber: subscribing(person, config) };
   } catch (e) {
     json(res, 401, {
       error: {
@@ -729,6 +718,28 @@ async function streamSubject(
 function subscriberOf(who: Principal, config: Config): { subject: string; for: "person" | "system" } | null {
   if (config.auth.mode === "off") return { subject: SYSTEM, for: "system" };
   return who.kind === "person" ? { subject: who.subject, for: "person" } : null;
+}
+
+/** The grant of the doors that change Kvasir. */
+const WORK: Grant[] = ["kvasir:work"];
+/** What a subscription of one's own needs to be signed in, chosen, and to answer a stream (record 25). */
+const SUBSCRIBES: Grant[] = ["assistant:use", "kvasir:see"];
+const SUBSCRIBES_NEEDS = "a subscription of your own needs assistant:use and kvasir:see";
+
+/** Whose subscription a caller's stream may use: the install's where nobody signs in, and otherwise the caller's own while they hold what it needs. */
+function subscribing(p: Principal, config: Config): string | null {
+  if (config.auth.mode === "off") return SYSTEM;
+  return holds(p, ...SUBSCRIBES) ? p.subject : null;
+}
+
+/** A door the caller's grants do not open: 403 no_grant, naming the grants it needs. */
+function noGrant(res: ServerResponse, needs: Grant[], message: string): void {
+  json(res, 403, { error: { code: "no_grant", message, needs } });
+}
+
+/** A subscription door called by an app or a key: a subscription is a person's. */
+function notAPerson(res: ServerResponse): void {
+  json(res, 403, { error: { code: "not_a_person", message: "a subscription is a person's" } });
 }
 
 function heldError(res: ServerResponse, e: unknown): void {

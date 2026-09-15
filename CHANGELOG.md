@@ -4,6 +4,12 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- Callers hold grants in place of the ladder's roles (record 25). A token from a trusted issuer brings its `grants` claim, taken as it is: a string Kvasir does not know is dropped, and a work grant includes its see. Its groups still map through `auth.roles`, and a token in `auth.tokens` still lists what it holds; both may now name grants beside the ladder's steps and `assist`, each of which stands for its set, so a configuration that maps groups to reader, reviewer, operator or admin keeps working. A trust entry with `keepSubject: true`, as setup writes the desk's own, takes a subject that already holds `@` as the principal; every other entry qualifies a subject by its issuer's host, as before. A caller left with no grant is refused with `no_grant` in place of `no_role`. A minted key still acts by its purposes and its class.
+- Every door that needed admin needs `kvasir:work`: keys, the policy table, trying, adding and removing a backend, credentials, admission runs, lifecycle changes and every door of `/v1/local`. The refusal is 403 `no_grant`, with the grants the door needs in `needs`. A backend's `base_url` and who added it, and every row of the ledger, are shown to `kvasir:work`; anyone with a grant reads the rest, and their own ledger rows.
+- A person's own ChatGPT subscription needs `assistant:use` and `kvasir:see` to start a sign-in and to choose its model, and answers a stream only while its person holds both, whether the person calls or an app names them in `x-kvasir-person`. Otherwise the stream runs as a signed-out person's does, on the local default, and so does a stream with a grant that went to the subscription earlier. Its status and signing out need only the person. Where nobody signs in it is the install's, as before. An app or a key calling a subscription door is refused with `not_a_person` in place of `no_role`.
+
 ## [1.0.0-alpha.6] - 2026-09-14
 
 ### Fixed

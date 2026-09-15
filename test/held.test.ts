@@ -53,7 +53,7 @@ async function kvasir(
         origin: "http://kvasir.test",
         auth: {
           mode: "token",
-          tokens: { "an-admin-token": "anna@lab:admin", "a-reader-token": "bo@lab:reader" },
+          tokens: { "an-admin-token": "anna@lab:kvasir:work", "a-reader-token": "bo@lab:kvasir:see" },
         },
         store: join(dir, "kvasir.sqlite"),
         pepperFile: join(dir, "kvasir.pepper"),
@@ -140,6 +140,7 @@ describe("the models Kvasir holds", () => {
     });
     const asReader = await (await fetch(`${url}/v1/backends`, { headers: reader })).json();
     expect(asReader.backends[0].base_url).toBeUndefined();
+    expect(asReader.backends[0].added_by).toBeUndefined();
     expect(readFileSync(join(dir, "kvasir.sqlite")).includes(Buffer.from("sk-good"))).toBe(false);
     expect((await post(url, "/v1/backends", { ...base, id: "card", models: ["qwen"] })).status).toBe(409);
     expect((await post(url, "/v1/backends", { ...base, models: ["qwen"] }, reader)).status).toBe(403);

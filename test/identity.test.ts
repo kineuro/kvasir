@@ -149,13 +149,13 @@ describe("identity", () => {
     }
   });
 
-  it("refuses a stream with no principal, and a token whose groups map to no role", async () => {
+  it("refuses a stream with no principal, and a token that holds no grant", async () => {
     const g = gate();
     g.open();
     const { url } = await kvasir(
       {
         mode: "token",
-        tokens: { "a-token-of-a-nobody": "cy@lab:", "an-operator-token-x": "ops@lab:operator" },
+        tokens: { "a-token-of-a-nobody": "cy@lab:", "an-assistant-token": "ops@lab:assistant:use" },
       },
       await g.url,
     );
@@ -176,9 +176,10 @@ describe("identity", () => {
       body,
     });
     expect(nobody.status).toBe(403);
+    expect((await nobody.json()).error.code).toBe("no_grant");
     const ops = await fetch(`${url}/v1/messages`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: "Bearer an-operator-token-x" },
+      headers: { "content-type": "application/json", authorization: "Bearer an-assistant-token" },
       body,
     });
     expect(ops.status).toBe(200);
@@ -197,7 +198,7 @@ describe("identity", () => {
         ],
         groupsClaim: t.groups_claim,
         roles: t.roles,
-        tokens: { "the-installers-token": "nils-setup:admin" },
+        tokens: { "the-installers-token": "nils-setup:kvasir:work" },
       },
       await g.url,
     );
@@ -218,7 +219,7 @@ describe("minted keys", () => {
     const { k, url } = await kvasir(
       {
         mode: "token",
-        tokens: { "an-admin-token-xxxx": "anna@lab:admin", "a-reader-token-xxxx": "bo@lab:reader" },
+        tokens: { "an-admin-token-xxxx": "anna@lab:kvasir:work", "a-reader-token-xxxx": "bo@lab:kvasir:see" },
       },
       await g.url,
     );
@@ -280,7 +281,7 @@ describe("the ledger and admission", () => {
     const g = gate();
     g.open();
     const { k, url } = await kvasir(
-      { mode: "token", tokens: { "an-admin-token-xxxx": "anna@lab:admin" } },
+      { mode: "token", tokens: { "an-admin-token-xxxx": "anna@lab:kvasir:work" } },
       await g.url,
     );
     closers.push(async () => (await g.server).close());
@@ -342,7 +343,7 @@ describe("the ledger and admission", () => {
   it("admits eight, queues the ninth with a heartbeat, and refuses the seventeenth at the health layer", async () => {
     const g = gate();
     const { url } = await kvasir(
-      { mode: "token", tokens: { "an-admin-token-xxxx": "anna@lab:admin" } },
+      { mode: "token", tokens: { "an-admin-token-xxxx": "anna@lab:kvasir:work" } },
       await g.url,
     );
     closers.push(async () => (await g.server).close());

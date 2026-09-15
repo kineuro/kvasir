@@ -249,7 +249,7 @@ async function hub(repos: FakeRepo[], opts: { cdn?: boolean } = {}) {
   };
 }
 
-const TOKENS = { "an-admin-token": "anna@lab:admin", "a-reader-token": "bo@lab:reader" };
+const TOKENS = { "an-admin-token": "anna@lab:kvasir:work", "a-reader-token": "bo@lab:kvasir:see" };
 /** Room enough on every file system, unless a test says otherwise. */
 const ROOMY = () => ({ bavail: 2 ** 40, bsize: 1 });
 
@@ -632,7 +632,7 @@ describe("local models", () => {
     expect((await call(url, "DELETE", "/v1/local/token")).status).toBe(404);
   });
 
-  it("are an admin's: every door refuses a reader", async () => {
+  it("need kvasir:work: every door refuses kvasir:see", async () => {
     const h = await hub([TINY]);
     const { k, url } = await kvasir(h.url);
     const doors: [string, string, unknown?][] = [
@@ -649,7 +649,7 @@ describe("local models", () => {
     for (const [method, path, body] of doors) {
       const r = await call(url, method, path, body, reader);
       expect(r.status, `${method} ${path}`).toBe(403);
-      expect(r.body.error.code).toBe("no_role");
+      expect(r.body.error.code).toBe("no_grant");
     }
     expect(k.local.hasToken()).toBe(false);
     expect(k.local.list()).toEqual([]);

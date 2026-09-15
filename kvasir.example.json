@@ -7,7 +7,8 @@
       {
         "issuer": "https://auth.example.org/application/o/nils/",
         "audience": "the-client-id",
-        "jwks": "https://auth.example.org/application/o/nils/jwks/"
+        "jwks": "https://auth.example.org/application/o/nils/jwks/",
+        "keepSubject": false
       }
     ],
     "groupsClaim": "roles",
@@ -15,7 +16,8 @@
       "reader": "reader",
       "reviewer": "reviewer",
       "operator": "operator",
-      "admin": "admin"
+      "admin": "admin",
+      "assist": "assist"
     }
   },
   "store": "kvasir.sqlite",

@@ -3,13 +3,17 @@
 // code, sealed under the person, refreshed before it expires, and signed out;
 // the install's where nobody signs in; a purpose moved to ChatGPT going to the
 // subscription of whoever streams, and to the default for someone with none;
-// and an app's key streaming for the person its person token names.
+// and an app's key streaming for the person its person token names. Signing
+// in and choosing a model need assistant:use and kvasir:see, and a
+// subscription answers a stream only while its person holds both (record 25).
 
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { afterAll, describe, expect, it } from "vitest";
+import type { Backend } from "../src/backends.js";
 import { parse } from "../src/config.js";
 import { build, type Kvasir, listen } from "../src/server.js";
 import { Store } from "../src/store.js";
@@ -205,9 +209,9 @@ async function kvasir(auth: unknown, fake: ReturnType<typeof fakeAuth>): Promise
 const tokens = {
   mode: "token",
   tokens: {
-    "anna-token": "anna@lab:admin",
-    "bo-token": "bo@lab:reader",
-    "app-token": "nils-assistant:reader",
+    "anna-token": "anna@lab:kvasir:work,assistant:use",
+    "bo-token": "bo@lab:query:work",
+    "app-token": "nils-assistant:kvasir:see",
   },
 };
 const as = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
@@ -319,5 +323,143 @@ describe("ChatGPT in the policy", () => {
     await tick();
     const status = await (await fetch(`${url}/v1/subscriptions`)).json();
     expect(status.subscriptions[0]).toMatchObject({ for: SYSTEM, state: "signed_in" });
+  });
+});
+
+/** The end of a stream as pi-ai's adapters give it. */
+function done(model: string): AssistantMessageEvent {
+  const usage = {
+    input: 1,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 2,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  return {
+    type: "done",
+    reason: "stop",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "a title" }],
+      api: "openai-codex-responses",
+      provider: "chatgpt",
+      model,
+      usage,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  } as unknown as AssistantMessageEvent;
+}
+
+/** One person with a token for each way of holding what a subscription needs, someone with kvasir:work, and an app. */
+const rule = {
+  mode: "token",
+  tokens: {
+    "both-token": "cy@lab:assistant:use,kvasir:see",
+    "use-token": "cy@lab:assistant:use",
+    "see-token": "cy@lab:kvasir:see",
+    "query-token": "cy@lab:query:work",
+    "work-token": "anna@lab:kvasir:work",
+    "app-token": "nils-assistant:kvasir:see",
+  },
+};
+
+// biome-ignore lint/suspicious/noExplicitAny: a door's answer, read as the test reads it
+async function send(url: string, method: string, path: string, token: string, body?: unknown): Promise<any> {
+  const r = await fetch(`${url}${path}`, {
+    method,
+    headers: as(token),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await r.text();
+  return { status: r.status, body: text ? JSON.parse(text) : null };
+}
+
+describe("the subscription rule", () => {
+  it("starts a sign-in and chooses a model only with assistant:use and kvasir:see, and its status and signing out need only the person", async () => {
+    const fake = fakeAuth();
+    const { url } = await kvasir(rule, fake);
+    const refused = [403, "no_grant", ["assistant:use", "kvasir:see"]];
+    for (const token of ["use-token", "see-token", "query-token", "work-token"]) {
+      const signIn = await send(url, "POST", "/v1/subscriptions/chatgpt/sign-in", token);
+      expect([signIn.status, signIn.body.error.code, signIn.body.error.needs], token).toEqual(refused);
+      const choose = await send(url, "PUT", "/v1/subscriptions/chatgpt", token, { model: "gpt-5.4-mini" });
+      expect([choose.status, choose.body.error.code, choose.body.error.needs], token).toEqual(refused);
+    }
+    const app = await send(url, "POST", "/v1/subscriptions/chatgpt/sign-in", "app-token");
+    expect([app.status, app.body.error.code]).toEqual([403, "not_a_person"]);
+    const started = await send(url, "POST", "/v1/subscriptions/chatgpt/sign-in", "both-token");
+    expect(started.body).toMatchObject({ state: "waiting" });
+    fake.approve();
+    await tick();
+    // the status is the person's, whatever they hold
+    const status = await send(url, "GET", "/v1/subscriptions", "query-token");
+    expect(status.body.subscriptions[0]).toMatchObject({ for: "person", state: "signed_in" });
+    const other = status.body.subscriptions[0].models.map((m: { id: string }) => m.id).at(-1);
+    const chosen = await send(url, "PUT", "/v1/subscriptions/chatgpt", "both-token", { model: other });
+    expect(chosen.body).toMatchObject({ model: other });
+    // and so is signing out
+    expect((await send(url, "DELETE", "/v1/subscriptions/chatgpt", "query-token")).status).toBe(204);
+    const after = await send(url, "GET", "/v1/subscriptions", "see-token");
+    expect(after.body.subscriptions[0].state).toBe("signed_out");
+  });
+
+  it("answers a stream only while its person holds both, and otherwise streams as a signed-out person's", async () => {
+    const rt = await runtime();
+    const fake = fakeAuth();
+    const { k, url } = await kvasir(rule, fake);
+    hold(k, [
+      { id: "card", baseUrl: `${rt.url}/v1`, locality: "local", warmup: false, models: [{ id: "qwen" }] },
+    ]);
+    for (const b of k.backends.list) b.health.warming = false;
+    // ChatGPT is never reached from a test: its backend answers here, and keeps whose subscription each stream used
+    const own = k.backends.get("chatgpt") as Backend;
+    const used: (string | undefined)[] = [];
+    own.stream = async function* (entry, _context, options) {
+      used.push(options.subject);
+      yield done(entry.id);
+    };
+    await send(url, "POST", "/v1/subscriptions/chatgpt/sign-in", "both-token");
+    fake.approve();
+    await tick();
+    const moved = await send(url, "PUT", "/v1/purposes/assistant.title/policy", "work-token", {
+      backend: "chatgpt",
+    });
+    expect(moved.status).toBe(200);
+    const stream = async (token: string, over: Record<string, string> = {}) => {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: "POST",
+        headers: { ...as(token), "x-kvasir-purpose": "assistant.title", ...over },
+        body: JSON.stringify({
+          model: "qwen",
+          context: { messages: [{ role: "user", content: "a title", timestamp: 1 }] },
+        }),
+      });
+      expect(r.status).toBe(200);
+      expect(await r.text()).toContain('"type":"done"');
+      const [last] = k.ledger.rows(null, 1);
+      return [last.subject, last.backend];
+    };
+    // the person's own stream, and an app's for them
+    expect(await stream("both-token")).toEqual(["cy@lab", "chatgpt"]);
+    expect(await stream("app-token", { "x-kvasir-person": "both-token" })).toEqual(["cy@lab", "chatgpt"]);
+    // the same person without one of the two, or either, streams as a signed-out person, on the default
+    expect(await stream("use-token")).toEqual(["cy@lab", "card"]);
+    expect(await stream("see-token")).toEqual(["cy@lab", "card"]);
+    expect(await stream("app-token", { "x-kvasir-person": "query-token" })).toEqual(["cy@lab", "card"]);
+    expect(used).toEqual(["cy@lab", "cy@lab"]);
+    // the grant door says the same
+    const grant = async (token: string) =>
+      (await send(url, "POST", "/v1/grants", token, { purpose: "assistant.title" })).body;
+    expect(await grant("both-token")).toMatchObject({ backend: "chatgpt" });
+    const signedOut = await grant("see-token");
+    expect(signedOut).toMatchObject({ backend: "card", model: "qwen" });
+    expect(signedOut.chose_because.join(" ")).toContain("no ChatGPT subscription is signed in");
+    // and a grant taken while the person held both runs on the default for a stream no subscription answers
+    const taken = await grant("both-token");
+    expect(await stream("see-token", { "x-kvasir-grant": taken.grant })).toEqual(["cy@lab", "card"]);
+    expect(await stream("both-token", { "x-kvasir-grant": taken.grant })).toEqual(["cy@lab", "chatgpt"]);
+    expect(used).toEqual(["cy@lab", "cy@lab", "cy@lab"]);
   });
 });

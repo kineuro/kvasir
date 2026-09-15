@@ -197,7 +197,7 @@ async function kvasir(
     JSON.stringify({
       bind: "127.0.0.1:0",
       origin: "http://kvasir.test",
-      auth: { mode: "token", tokens: { "a-kvasir-token": "anna@lab:admin" } },
+      auth: { mode: "token", tokens: { "a-kvasir-token": "anna@lab:kvasir:work" } },
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
       admission: { queue: 8, waitCapSeconds: 60, gate: false },

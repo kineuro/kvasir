@@ -1,6 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.1.0/schema.json",
-  "files": { "includes": ["src/**", "test/**"] },
+  // the suite's vectors are copied as the suite writes them, never formatted
+  "files": { "includes": ["src/**", "test/**", "!test/vectors"] },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 110 },
   "linter": { "enabled": true, "rules": { "recommended": true } },
   "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } }
