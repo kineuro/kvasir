@@ -58,7 +58,7 @@ async function kvasir(localUrl: string, remoteUrl: string): Promise<{ k: Kvasir;
       origin: "http://kvasir.test",
       auth: {
         mode: "token",
-        tokens: { "an-admin-token-xxxx": "anna@lab:admin", "a-reader-token-xxxx": "bo@lab:reader" },
+        tokens: { "an-admin-token-xxxx": "anna@lab:kvasir:work", "a-reader-token-xxxx": "bo@lab:kvasir:see" },
       },
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),

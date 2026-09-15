@@ -26,7 +26,7 @@ async function kvasir(backends: unknown[]): Promise<{ k: Kvasir; url: string }> 
       origin: "http://kvasir.test",
       auth: {
         mode: "token",
-        tokens: { "a-kvasir-token": "anna@lab:admin", "a-reader-token": "bo@lab:reader" },
+        tokens: { "a-kvasir-token": "anna@lab:kvasir:work", "a-reader-token": "bo@lab:kvasir:see" },
       },
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
@@ -65,7 +65,7 @@ describe("the model lifecycle", () => {
     const rt = await fakeRuntime(true);
     closers.push(() => rt.server.close());
     const { k, url } = await kvasir([local(rt.url, "card", [entry("qwen"), entry("qwen-tuned")])]);
-    // the doors are an admin's; the listing is anyone's
+    // the doors need kvasir:work; the listing is anyone's
     expect(
       (await call(url, "/v1/models/lifecycle", "POST", reader, { model: "qwen", backend: "card" })).status,
     ).toBe(403);

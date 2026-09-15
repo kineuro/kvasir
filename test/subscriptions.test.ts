@@ -205,9 +205,9 @@ async function kvasir(auth: unknown, fake: ReturnType<typeof fakeAuth>): Promise
 const tokens = {
   mode: "token",
   tokens: {
-    "anna-token": "anna@lab:admin",
-    "bo-token": "bo@lab:reader",
-    "app-token": "nils-assistant:reader",
+    "anna-token": "anna@lab:kvasir:work,assistant:use",
+    "bo-token": "bo@lab:query:work",
+    "app-token": "nils-assistant:kvasir:see",
   },
 };
 const as = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });

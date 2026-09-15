@@ -32,7 +32,7 @@ afterAll(async () => {
 });
 
 const KEY = "the-runtime-key";
-const TOKENS = { "an-admin-token": "anna@lab:admin", "a-reader-token": "bo@lab:reader" };
+const TOKENS = { "an-admin-token": "anna@lab:kvasir:work", "a-reader-token": "bo@lab:kvasir:see" };
 const admin = { authorization: "Bearer an-admin-token", "content-type": "application/json" };
 const reader = { authorization: "Bearer a-reader-token", "content-type": "application/json" };
 
@@ -501,7 +501,7 @@ describe("a model started on the runtime", () => {
     expect(runOf(second.k, a)?.started_by).toBe("anna@lab");
   });
 
-  it("is refused where it cannot start, is an admin's, and is not removed while started", async () => {
+  it("is refused where it cannot start, needs kvasir:work, and is not removed while started", async () => {
     const dir = temporary();
     const rt = await router(dir);
     const { k, url } = await kvasir(dir, rt.url);
@@ -528,7 +528,7 @@ describe("a model started on the runtime", () => {
     for (const path of [`/v1/local/models/${gguf}/start`, `/v1/local/models/${gguf}/stop`]) {
       const r = await call(url, "POST", path, undefined, reader);
       expect(r.status, path).toBe(403);
-      expect(r.body.error.code).toBe("no_role");
+      expect(r.body.error.code).toBe("no_grant");
     }
 
     expect((await call(url, "POST", `/v1/local/models/${gguf}/start`)).status).toBe(202);

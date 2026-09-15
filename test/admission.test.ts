@@ -26,7 +26,7 @@ async function kvasir(backends: unknown[], gate = true): Promise<{ k: Kvasir; ur
       origin: "http://kvasir.test",
       auth: {
         mode: "token",
-        tokens: { "a-kvasir-token": "anna@lab:admin", "a-reader-token": "bo@lab:reader" },
+        tokens: { "a-kvasir-token": "anna@lab:kvasir:work", "a-reader-token": "bo@lab:kvasir:see" },
       },
       store: join(dir, "kvasir.sqlite"),
       pepperFile: join(dir, "kvasir.pepper"),
@@ -70,7 +70,7 @@ describe("the admission suite", () => {
     expect(by(badRecord, "tool_calls").passed).toBe(true);
   }, 30_000);
 
-  it("a local model is not in the catalog until admitted; the record names the runtime and the build; the door is an admin's", async () => {
+  it("a local model is not in the catalog until admitted; the record names the runtime and the build; the door needs kvasir:work", async () => {
     const rt = await fakeRuntime(true);
     closers.push(() => rt.server.close());
     const { k, url } = await kvasir([local(rt.url)]);
