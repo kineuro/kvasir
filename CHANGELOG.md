@@ -4,6 +4,8 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.7] - 2026-09-15
+
 ### Changed
 
 - Callers hold grants in place of the ladder's roles (record 25). A token from a trusted issuer brings its `grants` claim, taken as it is: a string Kvasir does not know is dropped, and a work grant includes its see. Its groups still map through `auth.roles`, and a token in `auth.tokens` still lists what it holds; both may now name grants beside the ladder's steps and `assist`, each of which stands for its set, so a configuration that maps groups to reader, reviewer, operator or admin keeps working. A trust entry with `keepSubject: true`, as setup writes the desk's own, takes a subject that already holds `@` as the principal; every other entry qualifies a subject by its issuer's host, as before. A caller left with no grant is refused with `no_grant` in place of `no_role`. A minted key still acts by its purposes and its class.
