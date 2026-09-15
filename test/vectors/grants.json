@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NILS grants test vectors",
+  "description": "Record 25: how a caller's grants and detail are resolved, narrowed by a ceiling, and named. Every implementation (the engine, Kvasir, the assistant, the desk) runs these. Grants in an expectation are sorted by code point. A work grant includes its see. A ladder name stands for its set wherever it is met: a group bound to it, a named token's role list, a legacy entitlement, a ceiling. A ceiling keeps the grants its set holds, always keeps assistant:use (the assistant checks that one before any call), and lowers detail to its step's; admin keeps everything.",
+  "sets": {
+    "reader": {
+      "grants": ["data:see", "query:see", "query:work"],
+      "detail": "plain"
+    },
+    "reviewer": {
+      "grants": ["data:see", "pipelines:see", "query:see", "query:work", "review:see", "review:work"],
+      "detail": "quasi"
+    },
+    "operator": {
+      "grants": ["assistant-settings:see", "data:see", "data:work", "install:see", "kvasir:see", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+      "detail": "sensitive"
+    },
+    "admin": {
+      "grants": ["assistant-settings:see", "assistant-settings:work", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+      "detail": "sensitive"
+    },
+    "assist": {
+      "grants": ["assistant:use"],
+      "detail": "plain"
+    }
+  },
+  "everything": {
+    "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+    "detail": "sensitive"
+  },
+  "groups_claim": "groups",
+  "roles": {
+    "students": "reader",
+    "reviewers": "reviewer",
+    "kvasir-people": "kvasir:see",
+    "nils": "assist"
+  },
+  "claims": [
+    {
+      "name": "a desk token's grants are taken as they are",
+      "claims": { "grants": ["review:work", "data:see"], "detail": "quasi" },
+      "expect": { "grants": ["data:see", "review:see", "review:work"], "detail": "quasi" }
+    },
+    {
+      "name": "work includes see",
+      "claims": { "grants": ["kvasir:work"] },
+      "expect": { "grants": ["kvasir:see", "kvasir:work"], "detail": "plain" }
+    },
+    {
+      "name": "a string outside the vocabulary is dropped",
+      "claims": { "grants": ["query:see", "coffee:work", "assistant:see", "audit:work", "query"] },
+      "expect": { "grants": ["query:see"], "detail": "plain" }
+    },
+    {
+      "name": "a group bound to a ladder name stands for its set",
+      "claims": { "groups": ["students"] },
+      "expect": { "grants": ["data:see", "query:see", "query:work"], "detail": "plain" }
+    },
+    {
+      "name": "a group bound to a grant gives that grant",
+      "claims": { "groups": ["kvasir-people"] },
+      "expect": { "grants": ["kvasir:see"], "detail": "plain" }
+    },
+    {
+      "name": "grants and groups add up, and the higher detail holds",
+      "claims": { "grants": ["assistant:use"], "detail": "plain", "groups": ["reviewers"] },
+      "expect": { "grants": ["assistant:use", "data:see", "pipelines:see", "query:see", "query:work", "review:see", "review:work"], "detail": "quasi" }
+    },
+    {
+      "name": "assist stands for the assistant",
+      "claims": { "groups": ["nils"] },
+      "expect": { "grants": ["assistant:use"], "detail": "plain" }
+    },
+    {
+      "name": "an unknown detail reads as plain",
+      "claims": { "grants": ["query:see"], "detail": "everything" },
+      "expect": { "grants": ["query:see"], "detail": "plain" }
+    },
+    {
+      "name": "a caller left with no grant is refused",
+      "claims": { "groups": ["visitors"] },
+      "expect": { "refused": true }
+    },
+    {
+      "name": "detail alone opens nothing",
+      "claims": { "grants": [], "detail": "sensitive" },
+      "expect": { "refused": true }
+    }
+  ],
+  "ceilings": [
+    {
+      "name": "a reader ceiling keeps a reader's grants and the assistant, and lowers detail",
+      "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+      "detail": "sensitive",
+      "ceiling": "reader",
+      "expect": { "grants": ["assistant:use", "data:see", "query:see", "query:work"], "detail": "plain" }
+    },
+    {
+      "name": "a ceiling above the caller changes nothing",
+      "grants": ["query:see", "query:work"],
+      "detail": "plain",
+      "ceiling": "operator",
+      "expect": { "grants": ["query:see", "query:work"], "detail": "plain" }
+    },
+    {
+      "name": "a reviewer ceiling on an operator",
+      "grants": ["assistant-settings:see", "data:see", "data:work", "install:see", "kvasir:see", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+      "detail": "sensitive",
+      "ceiling": "reviewer",
+      "expect": { "grants": ["data:see", "pipelines:see", "query:see", "query:work", "review:see", "review:work"], "detail": "quasi" }
+    },
+    {
+      "name": "an operator ceiling takes work on Kvasir away",
+      "grants": ["assistant:use", "kvasir:see", "kvasir:work"],
+      "detail": "plain",
+      "ceiling": "operator",
+      "expect": { "grants": ["assistant:use", "kvasir:see"], "detail": "plain" }
+    },
+    {
+      "name": "an admin ceiling keeps everything",
+      "grants": ["assistant:use", "identity:see", "identity:work"],
+      "detail": "quasi",
+      "ceiling": "admin",
+      "expect": { "grants": ["assistant:use", "identity:see", "identity:work"], "detail": "quasi" }
+    }
+  ],
+  "named": [
+    {
+      "name": "ladder names stand for the highest one's set",
+      "roles": "reader,reviewer",
+      "expect": { "grants": ["data:see", "pipelines:see", "query:see", "query:work", "review:see", "review:work"], "detail": "quasi" }
+    },
+    {
+      "name": "grants in a role list are taken as they are",
+      "roles": "query:work,kvasir:work",
+      "expect": { "grants": ["kvasir:see", "kvasir:work", "query:see", "query:work"], "detail": "plain" }
+    },
+    {
+      "name": "admin is every grant but the assistant",
+      "roles": "admin",
+      "expect": { "grants": ["assistant-settings:see", "assistant-settings:work", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"], "detail": "sensitive" }
+    },
+    {
+      "name": "admin with assist is everything",
+      "roles": "admin,assist",
+      "expect": { "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"], "detail": "sensitive" }
+    },
+    {
+      "name": "an empty role list is refused",
+      "roles": "",
+      "expect": { "refused": true }
+    }
+  ],
+  "principals": [
+    {
+      "name": "a subject without @ is qualified by the issuer's host",
+      "iss": "https://desk.example.org/",
+      "sub": "anna",
+      "expect": "anna@desk.example.org"
+    },
+    {
+      "name": "a subject the desk already qualified is kept",
+      "iss": "https://desk.example.org/",
+      "sub": "8c1f2a@id.example.org",
+      "expect": "8c1f2a@id.example.org"
+    }
+  ]
+}
