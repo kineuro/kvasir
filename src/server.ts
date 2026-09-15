@@ -10,7 +10,7 @@ import { type Backend, Backends } from "./backends.js";
 import { chatgptAuth, chatgptBackend, chatgptModels } from "./chatgpt.js";
 import { type Config, pepper } from "./config.js";
 import { Credentials, openSeal } from "./credentials.js";
-import { chatCompletions, json, piMessages, readBody } from "./doors.js";
+import { chatCompletions, json, piMessages, readBody, type Whose } from "./doors.js";
 import { described, Held, HeldRefused, tryBackend } from "./held.js";
 import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
@@ -317,13 +317,13 @@ async function route(
       .models.map((m) => ({ id: m.id, object: "model", owned_by: m.backend }));
     json(res, 200, { object: "list", data: models });
   } else if (path === "/v1/messages" && req.method === "POST") {
-    const subject = await streamSubject(req, res, who, auth, config);
-    if (subject !== null)
-      await piMessages(req, res, backends, who, ledger, policy, subject, { keepAliveMs: k.keepAliveMs });
+    const whose = await streamSubject(req, res, who, auth, config);
+    if (whose !== null)
+      await piMessages(req, res, backends, who, ledger, policy, whose, { keepAliveMs: k.keepAliveMs });
   } else if (path === "/v1/chat/completions" && req.method === "POST") {
-    const subject = await streamSubject(req, res, who, auth, config);
-    if (subject !== null)
-      await chatCompletions(req, res, backends, who, ledger, policy, subject, { keepAliveMs: k.keepAliveMs });
+    const whose = await streamSubject(req, res, who, auth, config);
+    if (whose !== null)
+      await chatCompletions(req, res, backends, who, ledger, policy, whose, { keepAliveMs: k.keepAliveMs });
   } else if (path === "/v1/keys" && req.method === "GET") {
     if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the keys need kvasir:work");
     json(res, 200, { keys: keys.list() });
@@ -366,7 +366,7 @@ async function route(
         pin: typeof body.pin === "string" ? body.pin : null,
         bumped,
         keyClass: who.key?.maxClass,
-        subject: config.auth.mode === "off" ? SYSTEM : who.subject,
+        subject: subscribing(who, config),
       });
       json(res, 200, g);
     } catch (e) {
@@ -469,13 +469,15 @@ async function route(
     credentials.put(provider, body.secret);
     json(res, 200, { provider, stored: true, shown: "never" });
   } else if (path === "/v1/subscriptions" && req.method === "GET") {
-    // record 23: a person's own subscription, or the install's where nobody signs in
+    // record 23: a person's own subscription, or the install's where nobody signs in; its status is the person's
     const whose = subscriberOf(who, config);
     if (!whose) return notAPerson(res);
     json(res, 200, { subscriptions: [subscriptions.status(whose.subject, whose.for)] });
   } else if (path === `/v1/subscriptions/${CHATGPT}/sign-in` && req.method === "POST") {
+    // record 25: starting a sign-in, and choosing the model, need assistant:use and kvasir:see
     const whose = subscriberOf(who, config);
     if (!whose) return notAPerson(res);
+    if (!holds(who, ...SUBSCRIBES)) return noGrant(res, SUBSCRIBES, SUBSCRIBES_NEEDS);
     try {
       const waiting = await subscriptions.signIn(whose.subject);
       json(res, 200, {
@@ -495,6 +497,7 @@ async function route(
   } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "PUT") {
     const whose = subscriberOf(who, config);
     if (!whose) return notAPerson(res);
+    if (!holds(who, ...SUBSCRIBES)) return noGrant(res, SUBSCRIBES, SUBSCRIBES_NEEDS);
     const body = JSON.parse((await readBody(req)) || "{}");
     try {
       subscriptions.choose(whose.subject, String(body.model ?? ""));
@@ -503,6 +506,7 @@ async function route(
       json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
     }
   } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "DELETE") {
+    // signing out needs only the person
     const whose = subscriberOf(who, config);
     if (!whose) return notAPerson(res);
     res.writeHead(subscriptions.signOut(whose.subject) ? 204 : 404);
@@ -685,7 +689,9 @@ async function localDoor(
  * person calling with their own token, theirs; an app's key calling for a
  * person, that person's, named in `x-kvasir-person` with their own token and
  * verified. A person token that does not verify is refused rather than
- * streamed as the app.
+ * streamed as the app. The person's subscription answers the stream only
+ * while they hold assistant:use and kvasir:see (record 25); otherwise the
+ * stream goes as a signed-out person's does.
  */
 async function streamSubject(
   req: IncomingMessage,
@@ -693,12 +699,13 @@ async function streamSubject(
   who: Principal,
   auth: Auth,
   config: Config,
-): Promise<string | null> {
-  if (config.auth.mode === "off") return SYSTEM;
+): Promise<Whose | null> {
+  if (config.auth.mode === "off") return { subject: SYSTEM, subscriber: SYSTEM };
   const token = String(req.headers["x-kvasir-person"] ?? "").trim();
-  if (!token || who.kind === "person") return who.subject;
+  if (!token || who.kind === "person") return { subject: who.subject, subscriber: subscribing(who, config) };
   try {
-    return (await auth.person(token)).subject;
+    const person = await auth.person(token);
+    return { subject: person.subject, subscriber: subscribing(person, config) };
   } catch (e) {
     json(res, 401, {
       error: {
@@ -718,6 +725,16 @@ function subscriberOf(who: Principal, config: Config): { subject: string; for: "
 
 /** The grant of the doors that change Kvasir. */
 const WORK: Grant[] = ["kvasir:work"];
+/** What a subscription of one's own needs to be signed in, chosen, and to answer a stream (record 25). */
+const SUBSCRIBES: Grant[] = ["assistant:use", "kvasir:see"];
+const SUBSCRIBES_NEEDS = "a subscription of your own needs assistant:use and kvasir:see";
+
+/** Whose subscription a caller's stream may use: the install's where nobody signs in, and otherwise the caller's own while they hold what it needs. */
+function subscribing(p: Principal, config: Config): string | null {
+  if (config.auth.mode === "off") return SYSTEM;
+  return holds(p, ...SUBSCRIBES) ? p.subject : null;
+}
+
 /** A door the caller's grants do not open: 403 no_grant, naming the grants it needs. */
 function noGrant(res: ServerResponse, needs: Grant[], message: string): void {
   json(res, 403, { error: { code: "no_grant", message, needs } });

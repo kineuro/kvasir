@@ -220,7 +220,8 @@ export class Auth {
    * The person an app streams for (record 23): that person's own token, sent
    * beside the app's minted key and verified as the person's own call would be,
    * used only to find whose subscription a stream may use. A machine, a key, or
-   * a token that does not verify is refused.
+   * a token that does not verify is refused. A person holding no grant is still
+   * that person: what they hold decides only whether their subscription answers.
    */
   async person(token: string): Promise<Principal> {
     if (this.config.mode === "off") throw new Refused(401, "nobody signs in here");
@@ -228,7 +229,7 @@ export class Auth {
     const p = named ? this.named(named) : this.config.mode === "oidc" ? await this.verify(token) : undefined;
     if (p?.kind !== "person")
       throw new Refused(401, "the person's token is not one of a person this gateway trusts");
-    return admitted(p);
+    return p;
   }
 
   /** The principal a configured token names, "principal@node:name,name"; a grant holds a colon of its own. */

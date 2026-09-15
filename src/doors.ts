@@ -137,6 +137,17 @@ export function toPiMessagesEvent(ev: AssistantMessageEvent): Record<string, unk
 
 type Found = NonNullable<ReturnType<Backends["find"]>>;
 
+/**
+ * Whose stream a call is: the subject its ledger row names, a person's, the
+ * system's where nobody signs in, or the app's own (record 23); and whose
+ * subscription it may use, or none where that person does not hold what a
+ * subscription needs (record 25).
+ */
+export interface Whose {
+  subject: string;
+  subscriber: string | null;
+}
+
 /** Where a call may go (§8.3), or why it may not. */
 type Decision =
   | { ok: true; found: Found; granted: Grant | null; purpose: string | null }
@@ -156,8 +167,8 @@ function decide(
   text: string,
   policy: Policy,
   backends: Backends,
-  /** Whose stream this is: a person's, the system's where nobody signs in, or the app's own (record 23). */
-  subject: string,
+  /** Whose subscription the call may use, or none (record 25). */
+  subscriber: string | null,
 ): Decision {
   let granted: Grant | null = null;
   let purpose: string | null = null;
@@ -171,8 +182,16 @@ function decide(
         throw new PolicyRefused(403, [
           { layer: "policy", fact: "the grant is unknown or expired", relaxation: "ask for a grant again" },
         ]);
-      if (bumped && granted.locality === "remote") {
-        granted = policy.grant(granted.purpose, {}, { bumped, keyClass: who.key?.maxClass, subject });
+      // a grant that went to a subscription goes to the default for a stream no subscription answers (record 25)
+      const unanswered =
+        backends.get(granted.backend)?.config.builtin === true &&
+        !(subscriber !== null && policy.subscribed(subscriber));
+      if ((bumped && granted.locality === "remote") || unanswered) {
+        granted = policy.grant(
+          granted.purpose,
+          {},
+          { bumped, keyClass: who.key?.maxClass, subject: subscriber },
+        );
       }
     } else if (purposeHeader || (who.kind === "key" && (who.key?.purposes.length ?? 0) > 0)) {
       purpose = purposeHeader || (who.key?.purposes[0] ?? "");
@@ -181,7 +200,16 @@ function decide(
           { layer: "policy", fact: `the key's purposes do not include ${purpose}` },
         ]);
       }
-      granted = policy.grant(purpose, {}, { pin: model, bumped, keyClass: who.key?.maxClass, subject });
+      granted = policy.grant(
+        purpose,
+        {},
+        {
+          pin: model,
+          bumped,
+          keyClass: who.key?.maxClass,
+          subject: subscriber,
+        },
+      );
     } else if (named.backend.config.locality !== "local") {
       throw new PolicyRefused(403, [
         {
@@ -211,9 +239,10 @@ export async function piMessages(
   who: Principal,
   ledger: Ledger,
   policy: Policy,
-  subject: string,
+  whose: Whose,
   opts: { keepAliveMs?: number } = {},
 ): Promise<void> {
+  const { subject, subscriber } = whose;
   let body: { model?: string; context?: Context; options?: Record<string, unknown> };
   try {
     body = JSON.parse(await readBody(req));
@@ -240,7 +269,7 @@ export async function piMessages(
     userText(body.context),
     policy,
     backends,
-    subject,
+    subscriber,
   );
   if (!decision.ok) {
     const first = decision.refused.refusals[0];
@@ -304,7 +333,7 @@ export async function piMessages(
       temperature: typeof o.temperature === "number" ? o.temperature : undefined,
       maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : undefined,
       signal: controller.signal,
-      subject,
+      subject: subscriber ?? undefined,
     })) {
       if (
         ttftMs === null &&
@@ -442,9 +471,10 @@ export async function chatCompletions(
   who: Principal,
   ledger: Ledger,
   policy: Policy,
-  subject: string,
+  whose: Whose,
   opts: { keepAliveMs?: number } = {},
 ): Promise<void> {
+  const { subject, subscriber } = whose;
   let body: {
     model?: string;
     messages?: { role: string; content: unknown }[];
@@ -485,7 +515,16 @@ export async function chatCompletions(
       } as never);
     }
   }
-  const decision = decide(req, who, named, String(body.model), userText(context), policy, backends, subject);
+  const decision = decide(
+    req,
+    who,
+    named,
+    String(body.model),
+    userText(context),
+    policy,
+    backends,
+    subscriber,
+  );
   if (!decision.ok) {
     const first = decision.refused.refusals[0];
     ledger.record(
@@ -565,7 +604,7 @@ export async function chatCompletions(
       temperature: body.temperature,
       maxTokens: body.max_tokens,
       signal: controller.signal,
-      subject,
+      subject: subscriber ?? undefined,
     })) {
       if (
         ttftMs === null &&
