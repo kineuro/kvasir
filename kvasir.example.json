@@ -15,7 +15,8 @@
       "reader": "reader",
       "reviewer": "reviewer",
       "operator": "operator",
-      "admin": "admin"
+      "admin": "admin",
+      "assist": "assist"
     }
   },
   "store": "kvasir.sqlite",
