@@ -308,6 +308,6 @@ export class Auth {
 /** A caller let in: one holding at least one grant. */
 function admitted(p: Principal): Principal {
   if (p.grants.length === 0)
-    throw new Refused(403, `${p.subject} holds no grant: grants are given before a caller streams`);
+    throw new Refused(403, `${p.subject} holds no grant: a door opens only for a caller holding one`);
   return p;
 }

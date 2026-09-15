@@ -487,12 +487,9 @@ async function route(
         expires_at: waiting.expiresAt,
       });
     } catch (e) {
-      json(res, 502, {
-        error: {
-          code: "sign_in",
-          message: `ChatGPT did not start the sign-in: ${e instanceof Error ? e.message : String(e)}`,
-        },
-      });
+      const why = e instanceof Error ? e.message : String(e);
+      console.error(`kvasir: ChatGPT did not start the sign-in for ${whose.subject}: ${why}`);
+      json(res, 502, { error: { code: "sign_in", message: `ChatGPT did not start the sign-in: ${why}` } });
     }
   } else if (path === `/v1/subscriptions/${CHATGPT}` && req.method === "PUT") {
     const whose = subscriberOf(who, config);
