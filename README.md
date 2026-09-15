@@ -41,7 +41,7 @@ node dist/main.js --config kvasir.json
 
 `src/` is the service, `test/` its tests against fake backends, and `kvasir.example.json` the configuration with every setting. The models are not in it: Kvasir holds them in its database, and adds each one from the desk or with `kvasir models add` once it answers.
 
-Callers hold grants, as everywhere in NILS: a trusted token's `grants` claim, or what `auth.roles` binds a group to and a token in `auth.tokens` lists, each a grant or a ladder step that stands for its set. `kvasir:work` opens the doors that change Kvasir, and a person's own ChatGPT subscription needs `assistant:use` and `kvasir:see`.
+Callers hold grants, as everywhere in NILS: a trusted token's `grants` claim, or what `auth.roles` binds a group to and a token in `auth.tokens` lists, each a grant or a ladder step that stands for its set. `kvasir:work` opens the doors that change Kvasir, and a person's own ChatGPT subscription needs `assistant:use` and `kvasir:see`. A trust entry with `keepSubject: true`, the desk's own as setup writes it, takes a subject that already holds `@` as the principal; any other entry qualifies it by the issuer's host.
 
 ## Local models
 
