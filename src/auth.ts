@@ -120,15 +120,25 @@ export function union(parts: Access[]): Access {
   return { grants: [...grants].sort(), detail: DETAILS[rank] };
 }
 
-/** The principal a token's subject names: a subject that already holds @ as it is, any other qualified by its issuer's host. */
-export function qualified(issuer: string, sub: string): string {
-  return sub.includes("@") ? sub : `${sub}@${new URL(issuer).host}`;
+/**
+ * The principal a token's subject names: a subject that already holds @ as it
+ * is where its trust entry keeps subjects, and every other subject qualified by
+ * the issuer's host.
+ */
+export function qualified(trust: Trust, sub: string): string {
+  return trust.keepSubject === true && sub.includes("@") ? sub : `${sub}@${new URL(trust.issuer).host}`;
 }
 
 export interface Trust {
   issuer: string;
   audience: string;
   jwks: string;
+  /**
+   * Whether a subject that already holds @ is the principal as it is: the desk's
+   * own entry, as setup writes it (record 25). Any other entry qualifies every
+   * subject by its issuer's host, so no issuer names another's principal.
+   */
+  keepSubject?: boolean;
 }
 
 export interface AuthConfig {
@@ -275,7 +285,7 @@ export class Auth {
         `the token was refused: ${e instanceof Error ? e.message : "verification failed"}`,
       );
     }
-    const subject = qualified(entry.trust.issuer, String(payload.sub));
+    const subject = qualified(entry.trust, String(payload.sub));
     // the grants a token carries as they are, and what its groups are bound to beside them
     const groups = (payload[this.config.groupsClaim ?? "groups"] as unknown) ?? [];
     const bound = Array.isArray(groups)

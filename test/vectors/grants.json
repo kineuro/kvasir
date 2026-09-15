@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NILS grants test vectors",
-  "description": "Record 25: how a caller's grants and detail are resolved, narrowed by a ceiling, and named. Every implementation (the engine, Kvasir, the assistant, the desk) runs these. Grants in an expectation are sorted by code point. A work grant includes its see. A ladder name stands for its set wherever it is met: a group bound to it, a named token's role list, a legacy entitlement, a ceiling. A ceiling keeps the grants its set holds, always keeps assistant:use (the assistant checks that one before any call), and lowers detail to its step's; admin keeps everything.",
+  "description": "Record 25: how a caller's grants and detail are resolved, narrowed by a ceiling, and named. Every implementation (the engine, Kvasir, the assistant, the desk) runs these. Grants in an expectation are sorted by code point. A work grant includes its see. A ladder name stands for its set wherever it is met: a group bound to it, a named token's role list, a legacy entitlement, a ceiling. A ceiling keeps the grants its set holds, always keeps assistant:use (the assistant checks that one before any call), and lowers detail to its step's; admin keeps everything. A trust entry that keeps subjects (the desk's own, as setup writes it) takes a sub that already holds @ as the principal; any other entry qualifies a sub by the issuer's host.",
   "sets": {
     "reader": {
       "grants": ["data:see", "query:see", "query:work"],
@@ -156,13 +156,22 @@
       "name": "a subject without @ is qualified by the issuer's host",
       "iss": "https://desk.example.org/",
       "sub": "anna",
+      "keep_subject": true,
       "expect": "anna@desk.example.org"
     },
     {
-      "name": "a subject the desk already qualified is kept",
+      "name": "a subject the desk already qualified is kept by an entry that keeps subjects",
       "iss": "https://desk.example.org/",
       "sub": "8c1f2a@id.example.org",
+      "keep_subject": true,
       "expect": "8c1f2a@id.example.org"
+    },
+    {
+      "name": "any other entry qualifies a subject that holds @ all the same",
+      "iss": "https://id.example.org/",
+      "sub": "anna@example.org",
+      "keep_subject": false,
+      "expect": "anna@example.org@id.example.org"
     }
   ]
 }

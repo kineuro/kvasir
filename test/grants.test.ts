@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Grants (record 25): the suite's grants vectors run through Kvasir's own
 // identity; the doors of kvasir:work; what a backend and the ledger show to
-// whom; a principal the desk already qualified; and an install's mapping to
-// the ladder's names, which keeps working.
+// whom; a principal the desk already qualified, kept only by a trust entry
+// that keeps subjects; and an install's mapping to the ladder's names, which
+// keeps working.
 
 import { mkdtempSync, readFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
@@ -10,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importPKCS8, SignJWT } from "jose";
 import { afterAll, describe, expect, it } from "vitest";
-import { Auth, type AuthConfig, EVERYTHING, Refused, SETS } from "../src/auth.js";
+import { Auth, type AuthConfig, EVERYTHING, Refused, SETS, type Trust } from "../src/auth.js";
 import { parse } from "../src/config.js";
 import { build, type Kvasir, listen } from "../src/server.js";
 import { chunk, hold, serve, sse } from "./fake.js";
@@ -37,10 +38,10 @@ async function signed(claims: Record<string, unknown>): Promise<string> {
 }
 
 /** Identity that trusts one issuer with the suite's test keys, its groups bound as the vectors bind them. */
-function trusting(issuer: string, over: Partial<AuthConfig> = {}): AuthConfig {
+function trusting(issuer: string, over: Partial<AuthConfig> = {}, entry: Partial<Trust> = {}): AuthConfig {
   return {
     mode: "oidc",
-    trust: [{ issuer, audience: AUDIENCE, jwks: join(vectors, "jwks.json") }],
+    trust: [{ issuer, audience: AUDIENCE, jwks: join(vectors, "jwks.json"), ...entry }],
     groupsClaim: suite.groups_claim,
     roles: suite.roles,
     ...over,
@@ -87,9 +88,9 @@ describe("the grants vectors", () => {
     expect(await resolved(bare, "a-bare-token")).toEqual({ refused: true });
   });
 
-  it("name the principal a subject gives", async () => {
+  it("name the principal a subject gives, as its trust entry keeps subjects or not", async () => {
     for (const c of suite.principals) {
-      const auth = new Auth(trusting(c.iss), null);
+      const auth = new Auth(trusting(c.iss, {}, { keepSubject: c.keep_subject }), null);
       const token = await signed({ iss: c.iss, sub: c.sub, grants: ["query:see"] });
       expect((await auth.principal(request(token))).subject, c.name).toBe(c.expect);
     }
@@ -278,20 +279,30 @@ describe("kvasir:work", () => {
 });
 
 describe("a principal the desk already qualified", () => {
-  it("is kept as it is, on the ledger and among one's own rows, beside one Kvasir qualifies", async () => {
-    const { url } = await kvasir(trusting(ISSUER));
+  it("is kept as it is by the desk's entry, which keeps subjects, and qualified by any other entry", async () => {
+    const provider = "https://id.example.org/";
+    const desk = trusting(ISSUER, {}, { keepSubject: true });
+    const { url } = await kvasir({
+      ...desk,
+      trust: [
+        ...(desk.trust ?? []),
+        { issuer: provider, audience: AUDIENCE, jwks: join(vectors, "jwks.json") },
+      ],
+    });
     const qualified = await signed({
       sub: "8c1f2a@id.example.org",
       grants: ["assistant:use"],
       detail: "quasi",
     });
     const plain = await signed({ sub: "anna", grants: ["query:work"] });
-    expect(await streamed(url, qualified)).toBe(200);
-    expect(await streamed(url, plain)).toBe(200);
+    // another issuer naming a principal the desk's entry would keep is its own principal, never that one
+    const posing = await signed({ iss: provider, sub: "anna@desk.example.org", grants: ["query:work"] });
+    for (const token of [qualified, plain, posing]) expect(await streamed(url, token)).toBe(200);
     const rows = async (token: string) =>
       (await call(url, "GET", "/v1/ledger", token)).body.rows.map((r: { subject: string }) => r.subject);
     expect(await rows(qualified)).toEqual(["8c1f2a@id.example.org"]);
     expect(await rows(plain)).toEqual(["anna@desk.example.org"]);
+    expect(await rows(posing)).toEqual(["anna@desk.example.org@id.example.org"]);
     const mine = await call(url, "GET", "/v1/subscriptions", qualified);
     expect(mine.body.subscriptions[0]).toMatchObject({ for: "person", state: "signed_out" });
   });
