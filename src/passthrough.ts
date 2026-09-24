@@ -25,7 +25,14 @@ import { request as httpsRequest } from "node:https";
 import type { Principal } from "./auth.js";
 import { json, KEEP_ALIVE_MS, keepAlive } from "./doors.js";
 import type { Ledger, Row } from "./ledger.js";
-import { DOORS, type Found, type Lease, LeaseRefused, type Protocol, type Served } from "./served.js";
+import {
+  DOORS,
+  type Lease,
+  LeaseRefused,
+  type Protocol,
+  type ServedCatalog,
+  type ServedModel,
+} from "./served.js";
 
 /**
  * The bytes of text one token stands for at most, in the guard's estimate. A
@@ -54,7 +61,7 @@ const HOP = new Set([
 ]);
 
 export interface PassContext {
-  served: Served;
+  served: ServedCatalog;
   ledger: Ledger;
   who: Principal;
   keepAliveMs?: number;
@@ -63,10 +70,10 @@ export interface PassContext {
 }
 
 /** Whether a client key may ask for a model: every model where it lists none, else a model one of its names means. */
-export function mayUse(who: Principal, found: Found, served: Served): boolean {
+export function mayUse(who: Principal, model: ServedModel, served: ServedCatalog): boolean {
   const names = who.client?.models;
   if (!names) return true;
-  return names.some((n) => served.resolve(n)?.model.id === found.model.id);
+  return names.some((n) => served.find(n)?.id === model.id);
 }
 
 /** A refusal in the door's own shape: Anthropic's on messages, OpenAI's elsewhere. */
@@ -301,9 +308,9 @@ export async function passThrough(
   if (!body || typeof body !== "object" || Array.isArray(body))
     return refuse(res, protocol, 400, "invalid_request_error", "bad_request", "the body is a JSON object");
   const asked = typeof body.model === "string" && body.model ? body.model : null;
-  const found = asked ? ctx.served.resolve(asked) : ctx.served.default();
+  const found = asked ? ctx.served.find(asked) : ctx.served.default();
   // a chat request for a model no backend answers natively goes through pi-ai as it did before
-  const native = found?.model.local === true && found.model.protocols.includes(protocol);
+  const native = found?.local === true && found.protocols.includes(protocol);
   if (!native && protocol === "chat-completions" && ctx.translate && !ctx.who.client)
     return ctx.translate(text);
   if (!found)
@@ -315,7 +322,7 @@ export async function passThrough(
       "model_not_found",
       `no model ${asked ?? "is served"}; see GET /v1/models`,
     );
-  const { model, source } = found;
+  const model = found;
   const who = ctx.who;
   const started = Date.now();
   const ledgerRow = (over: Partial<Row>) =>
@@ -342,7 +349,7 @@ export async function passThrough(
     if (!counting) ledgerRow({ outcome: "refused", refusal: { layer: "requirement", fact } });
     refuse(res, protocol, status, type, code, fact);
   };
-  if (!mayUse(who, found, ctx.served))
+  if (!mayUse(who, model, ctx.served))
     return refused(403, "permission_error", "model_not_allowed", `this key may not use model ${model.id}`);
   if (!model.local)
     return refused(
@@ -412,9 +419,8 @@ export async function passThrough(
   };
   let lease: Lease;
   try {
-    lease = await source.lease(model, {
+    lease = await ctx.served.lease(model, {
       signal: upstreamAbort.signal,
-      mayLoad: who.client ? who.client.swap : true,
       heartbeat: stream
         ? () => {
             if (!committed) commit();

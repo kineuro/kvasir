@@ -17,7 +17,6 @@ import { stream as piStream } from "@earendil-works/pi-ai/api/pi-messages";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
 import { estimateInput } from "../src/passthrough.js";
-import type { Lease, ServedModel, ServedSource } from "../src/served.js";
 import { build, type Kvasir, listen, listenPublic, piShaped } from "../src/server.js";
 import { hold, serve } from "./fake.js";
 
@@ -730,105 +729,6 @@ describe("client keys", () => {
     const r = await fetch(`${url}/v1/models`, { headers: bearer("the-old-key") });
     expect(r.status).toBe(401);
   }, 90_000);
-});
-
-/**
- * A card as the K3 slice builds one, reduced to what the doors need: two
- * models, one loaded, aliases, and a lease that swaps. It shows the seam the
- * two slices share (src/served.ts).
- */
-function fakeCard(base: string): ServedSource & { loaded: string; swaps: number } {
-  const card = {
-    id: "card0",
-    loaded: FLASH,
-    swaps: 0,
-    models(): ServedModel[] {
-      return [
-        { id: FLASH, aliases: ["flash-next", "Qwen/Qwen3.8-Flash-Next"], default: true },
-        { id: DENSE, aliases: ["qwen38-27b-fast"], default: false },
-      ].map((m) => ({
-        ...m,
-        upstream: m.id,
-        status: m.id === card.loaded ? ("loaded" as const) : ("cold" as const),
-        ownedBy: "kineuro",
-        created: 0,
-        contextLength: 262_144,
-        maxOutputTokens: 65_536,
-        protocols: ["chat-completions", "messages"],
-        anthropicThinking: "disabled" as const,
-        local: true,
-        spec: { license: "test", swap_in_seconds: 1 },
-      }));
-    },
-    async lease(m: ServedModel, opts: { heartbeat: () => void; mayLoad: boolean }): Promise<Lease> {
-      if (card.loaded !== m.id) {
-        // a swap: a few heartbeats while the other model loads
-        for (let i = 0; i < 2; i += 1) {
-          await new Promise((r) => setTimeout(r, 1000));
-          opts.heartbeat();
-        }
-        card.loaded = m.id;
-        card.swaps += 1;
-      }
-      return {
-        base,
-        auth: { header: "authorization", value: `Bearer ${SGLANG_KEY}` },
-        backend: "card0",
-        release: () => {},
-      };
-    },
-    server: () => ({ state: "ready", loaded: card.loaded, last_swap_seconds: null }),
-  };
-  return card;
-}
-
-describe("a card behind the doors", () => {
-  it("answers aliases, shows loaded and cold, keeps a no-swap key off a cold model, and waits out a swap on a stream", async () => {
-    const seen: Seen[] = [];
-    const sg = await fakeSGLang(seen);
-    closers.push(() => sg.server.close());
-    const { k, url } = await kvasir(sg.url);
-    const card = fakeCard(sg.url);
-    k.served.register(card, { first: true });
-    const staying = k.clients.add("staying", { swap: false, by: "test" }).secret;
-    const swapping = k.clients.add("swapping", { by: "test" }).secret;
-    const listed = await (await fetch(`${url}/v1/models`, { headers: bearer(staying) })).json();
-    expect(listed.server).toEqual({ state: "ready", loaded: FLASH, last_swap_seconds: null });
-    expect(
-      listed.data
-        .slice(0, 2)
-        .map((m: { id: string; status: string; default: boolean }) => [m.id, m.status, m.default]),
-    ).toEqual([
-      [FLASH, "loaded", true],
-      [DENSE, "cold", false],
-    ]);
-    // a request with no model goes to the default; an alias to its model, sent on by its served name
-    await post(url, "/v1/chat/completions", bearer(staying), { messages: [{ role: "user", content: "Hi" }] });
-    expect(seen.at(-1)?.body.model).toBe(FLASH);
-    await post(url, "/v1/chat/completions", bearer(staying), {
-      model: "Qwen/Qwen3.8-Flash-Next",
-      messages: [{ role: "user", content: "Hi" }],
-    });
-    expect(seen.at(-1)?.body.model).toBe(FLASH);
-    const cold = await post(url, "/v1/chat/completions", bearer(staying), {
-      model: "qwen38-27b-fast",
-      messages: [{ role: "user", content: "Hi" }],
-    });
-    expect([cold.status, (await cold.json()).error.code]).toEqual([403, "may_not_swap"]);
-    expect(card.swaps).toBe(0);
-    // a key that may swap: the stream's headers at once, a comment while the card swaps, then the answer
-    const r = await post(url, "/v1/chat/completions", bearer(swapping), {
-      model: "qwen38-27b-fast",
-      stream: true,
-      messages: [{ role: "user", content: "Count." }],
-    });
-    expect(r.status).toBe(200);
-    const raw = await r.text();
-    expect(raw.startsWith(": queued\n\n")).toBe(true);
-    expect(raw).toContain('"content":" 10"');
-    expect(card.swaps).toBe(1);
-    expect(seen.at(-1)?.body.model).toBe(DENSE);
-  });
 });
 
 describe("the doors' surfaces", () => {

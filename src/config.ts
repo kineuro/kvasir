@@ -7,6 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { cardsOf } from "./card-config.js";
 import { HUB } from "./local.js";
 
 export type BackendKind = "openai-completions" | "anthropic-messages" | "openai-codex-responses";
@@ -27,6 +28,14 @@ export interface ModelEntry {
   contextWindow: number;
   maxTokens: number;
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Other names a client may ask for this model by (record 47), as modelgate's aliases. */
+  aliases?: string[];
+  /**
+   * The model's specs as its operator or its server gave them (record 47): the
+   * card's `spec`, or one entry of a model server's `/v1/models`, kept whole for
+   * the listing (src/served.ts).
+   */
+  spec?: Record<string, unknown>;
 }
 
 export interface BackendConfig {
@@ -77,6 +86,13 @@ export interface BackendConfig {
    * and modelgate did; `as-sent` leaves it to the model's own default.
    */
   anthropicThinking?: "disabled" | "as-sent";
+  /** The card this backend is a member of (record 47): one model of a group sharing one device, loaded when asked for. */
+  card?: string;
+  /**
+   * A model server of the group's (record 47, R3): its models and specs were read from its `/v1/models` and
+   * the admin ticked which to use, each admitted one by one; one backend holds every model ticked.
+   */
+  server?: boolean;
 }
 
 /**
@@ -129,6 +145,8 @@ export interface Config {
   public: { bind: string | null; doors: string[] };
   /** Client keys (record 47): the days a client key's ledger rows are kept (R8). */
   clients: { ledgerDays: number };
+  /** The cards Kvasir serves (record 47): groups of models sharing one device, one loaded at a time. */
+  cards: import("./card-config.js").CardConfig[];
 }
 
 /** The doors a client key opens, and the only ones a public listener answers, unless kvasir.json lists others. */
@@ -144,7 +162,8 @@ export const PUBLIC_DOORS = [
 ];
 
 export function parse(text: string): Config {
-  const raw = JSON.parse(text) as Omit<Partial<Config>, "local" | "hostAlias"> & {
+  const raw = JSON.parse(text) as Omit<Partial<Config>, "local" | "hostAlias" | "cards"> & {
+    cards?: unknown;
     backends?: unknown;
     oauth?: unknown;
     local?: { endpoint?: unknown; runtime?: unknown };
@@ -159,6 +178,7 @@ export function parse(text: string): Config {
     );
   if (raw.oauth !== undefined)
     throw new Error("kvasir.json: oauth is not a setting; a person signs in to their own subscription");
+  const local = { endpoint: endpointOf(raw.local?.endpoint), runtime: runtimeOf(raw.local?.runtime) };
   return {
     bind: raw.bind,
     origin: raw.origin.replace(/\/+$/u, ""),
@@ -172,10 +192,11 @@ export function parse(text: string): Config {
     },
     sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
     purposes: purposes(raw.purposes ?? []),
-    local: { endpoint: endpointOf(raw.local?.endpoint), runtime: runtimeOf(raw.local?.runtime) },
+    local,
     hostAlias: hostAliasOf(raw.hostAlias),
     public: publicOf(raw.public),
     clients: clientsOf(raw.clients),
+    cards: cardsOf(raw.cards, local.runtime),
   };
 }
 

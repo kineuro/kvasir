@@ -62,9 +62,11 @@ describe("the warm-up", () => {
     expect(b.health.warming).toBe(true);
   });
 
-  it("leaves alone a backend Kvasir does not warm, which a request's first token warms instead", async () => {
+  it("leaves alone a backend Kvasir does not warm, which never reports warming (#8)", async () => {
     const b = new Backend({ ...local("http://127.0.0.1:9"), concurrency: 1 } as unknown as BackendConfig);
     await b.keepWarm([5]);
-    expect(b.health.warming).toBe(true);
+    // kineuro/kvasir#8: a backend with warmup false was warming for ever, and held the desk on its warming page
+    expect(b.health.warming).toBe(false);
+    expect(b.health.firstTokenAt).toBeNull();
   });
 });

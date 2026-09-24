@@ -7,6 +7,8 @@ import { dirname, resolve } from "node:path";
 import { Admissions } from "./admission-records.js";
 import { Auth, type Grant, holds, type Principal, Refused } from "./auth.js";
 import { type Backend, Backends } from "./backends.js";
+import { type CardDriver, Cards, type CardTimes } from "./card.js";
+import type { CardConfig } from "./card-config.js";
 import { chatgptAuth, chatgptBackend, chatgptModels } from "./chatgpt.js";
 import { ClientRefused, Clients } from "./clients.js";
 import { type Config, isPublic, pepper } from "./config.js";
@@ -20,7 +22,8 @@ import { Local, type LocalOptions, LocalRefused } from "./local.js";
 import { mayUse, passThrough } from "./passthrough.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Runner, type RunnerOptions } from "./runtime.js";
-import { DOORS, heldSource, modelCard, Served } from "./served.js";
+import { DOORS, modelList, modelObject, type ServedCatalog, servedCatalog } from "./served.js";
+import { Servers } from "./servers.js";
 import { Store } from "./store.js";
 import { CHATGPT, type SubscriptionAuth, Subscriptions, SYSTEM } from "./subscriptions.js";
 import { measureOverhead, probeRuntime, runSuite } from "./suite.js";
@@ -36,8 +39,6 @@ export interface Kvasir {
   keys: Keys;
   /** Client keys (record 47): the keys of the doors that pass a request through. */
   clients: Clients;
-  /** The models the pass-through doors and `GET /v1/models` serve (record 47); a card registers here. */
-  served: Served;
   ledger: Ledger;
   auth: Auth;
   credentials: Credentials;
@@ -53,6 +54,12 @@ export interface Kvasir {
   admissions: Admissions;
   /** The model lifecycle (Wave 5 §9.5): registered, admitted, promoted, retired. */
   lifecycle: Lifecycle;
+  /** The cards kvasir.json names (record 47): models sharing one device, one loaded at a time; started by `kvasir` serving, never by the command line. */
+  cards: Cards;
+  /** Model servers held as backends (record 47): their offers, their ticked models admitted, their states followed. */
+  servers: Servers;
+  /** Every model a client may ask for, with its specs and whether it is loaded: what `GET /v1/models` lists (src/served.ts). */
+  served: ServedCatalog;
   /** The suite over one model, recorded, and the admitted set refreshed (§8.6). */
   admit: (
     backendId: string,
@@ -74,6 +81,10 @@ export function build(
     runtime?: RunnerOptions;
     /** How long a stream may say nothing before a comment keeps it; the doors' 15 seconds when absent. */
     keepAliveMs?: number;
+    /** The driver of each card, for a test; Docker or the llama.cpp router, as kvasir.json says, otherwise. */
+    cardDriver?: (c: CardConfig) => CardDriver;
+    /** The times of each card, for a test; kvasir.json's otherwise. */
+    cardTimes?: (c: CardConfig) => CardTimes;
   } = {},
 ): Kvasir {
   const store = new Store(config.store);
@@ -105,6 +116,8 @@ export function build(
     ? new Runner(store, held, backends, credentials, local, config.local.runtime, options.runtime)
     : null;
   local.runner = runner;
+  // the cards: each model served as a backend whose admission waits for the card to load it (record 47)
+  const cards = new Cards(config.cards, backends, options.cardDriver, options.cardTimes);
   // ChatGPT through each person's own subscription: Kvasir's own backend, served beside the added ones (record 23)
   const subscriptions = new Subscriptions(
     store,
@@ -115,9 +128,6 @@ export function build(
   backends.add(chatgptBackend(backends, subscriptions));
   policy.subscribed = (subject) => subscriptions.has(subject);
   policy.subscriptionModel = (subject) => subscriptions.model(subject);
-  // what the pass-through doors serve: the held backends, and a card where one registers first (record 47)
-  const served = new Served();
-  served.register(heldSource(backends));
   const admissions = new Admissions(store);
   const lifecycle = new Lifecycle(store);
   // a promoted candidate is the model the purposes route to on its backend
@@ -129,7 +139,14 @@ export function build(
     if (entries.length === 0) throw new Error(`no model ${modelId} on ${backendId}`);
     const out = [];
     for (const entry of entries) {
-      const rec = await runSuite(backend, entry, { log: opts.log });
+      // a card's model is loaded first, and kept on the card while the suite runs (record 47)
+      const leave = backend.admission.ahead ? await backend.admission.ahead() : null;
+      let rec: Awaited<ReturnType<typeof runSuite>>;
+      try {
+        rec = await runSuite(backend, entry, { log: opts.log });
+      } finally {
+        leave?.();
+      }
       rec.kvasir = VERSION;
       if (opts.overhead) {
         // through this process's own door, the same client, the same prompt
@@ -151,6 +168,15 @@ export function build(
     }
     return out;
   };
+  // model servers held as backends, and what each said of its models (record 47)
+  const servers = new Servers({ config, backends, credentials, held, admissions, admit, policy });
+  // what `GET /v1/models` lists and the pass-through doors serve: every backend's models, a card's with its
+  // status, a model server's with what it last said (record 47)
+  const served = servedCatalog(backends, {
+    card: (b) => cards.status(b),
+    remote: (b, e) => servers.remote(b.config.id, e.id),
+    server: () => cards.list[0]?.server() ?? null,
+  });
   const handle = (surface: "all" | "public") => async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://kvasir");
     const path = url.pathname.replace(/\/+$/u, "") || "/";
@@ -160,6 +186,12 @@ export function build(
       json(res, 404, {
         error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
       });
+      return;
+    }
+    if (path === "/health" && req.method === "GET") {
+      // modelgate's shape, for the probe on the model server (record 47): 200 while every card serves or swaps
+      const h = cards.health();
+      json(res, h.status, h.body);
       return;
     }
     if (path === "/healthz" && req.method === "GET") {
@@ -208,7 +240,6 @@ export function build(
         backends,
         keys,
         clients,
-        served,
         ledger,
         credentials,
         held,
@@ -219,6 +250,8 @@ export function build(
         admissions,
         lifecycle,
         admit,
+        servers,
+        served,
         keepAliveMs: options.keepAliveMs,
       });
     } catch (e) {
@@ -236,7 +269,6 @@ export function build(
     store,
     keys,
     clients,
-    served,
     ledger,
     auth,
     credentials,
@@ -247,6 +279,9 @@ export function build(
     policy,
     admissions,
     lifecycle,
+    cards,
+    servers,
+    served,
     admit,
     server,
     publicServer,
@@ -259,6 +294,8 @@ export function build(
       // stops with what it has, to carry on when Kvasir starts again
       held.unwatch();
       clearInterval(pruning);
+      servers.unwatch();
+      cards.close();
       for (const b of backends.list) b.stop();
       await runner?.close();
       await local.stop();
@@ -331,7 +368,6 @@ async function route(
     backends: Backends;
     keys: Keys;
     clients: Clients;
-    served: Served;
     ledger: Ledger;
     credentials: Credentials;
     held: Held;
@@ -342,6 +378,8 @@ async function route(
     admissions: Admissions;
     lifecycle: Lifecycle;
     admit: Kvasir["admit"];
+    servers: Servers;
+    served: ServedCatalog;
     keepAliveMs?: number;
   },
 ): Promise<void> {
@@ -361,7 +399,7 @@ async function route(
     admissions,
     lifecycle,
   } = k;
-  const { admit } = k;
+  const { admit, servers } = k;
   // the pass-through doors (record 47): the request as the client sent it, to a backend that speaks it
   const pass = (text: string, translate?: (text: string) => Promise<void>) =>
     passThrough(req, res, path, url.search, text, {
@@ -379,15 +417,13 @@ async function route(
       kvasir: { version: VERSION },
     });
   } else if (path === "/v1/models" && req.method === "GET") {
-    // modelgate's shape (record 47): each model with its aliases, whether it is the default and loaded, and its specs
-    const all = served.list().filter((f) => mayUse(who, f, served));
-    const defaultId = served.default()?.model.id;
-    const server = served.server();
-    json(res, 200, {
-      object: "list",
-      data: all.map((f) => modelCard(f, defaultId)),
-      ...(server ? { server } : {}),
-    });
+    // modelgate's shape (record 47): each model with its aliases, whether it is the default and loaded, and
+    // its specs; a client key sees the models it may use
+    json(
+      res,
+      200,
+      modelList(served, (m) => mayUse(who, m, served)),
+    );
   } else if (path === "/v1/pi/messages" && req.method === "POST") {
     const whose = await streamSubject(req, res, who, auth, config);
     if (whose !== null)
@@ -519,6 +555,8 @@ async function route(
         String(body.backend ?? ""),
         who.subject,
         typeof body.acknowledgement === "string" ? body.acknowledgement : null,
+        // a station maps to a backend and a model (record 47)
+        typeof body.model === "string" && body.model ? body.model : null,
       );
       json(res, 200, row);
     } catch (e) {
@@ -546,8 +584,13 @@ async function route(
           context_window: m.contextWindow,
           max_tokens: m.maxTokens,
           admitted: b.config.locality === "remote" ? null : b.admitted.has(m.id),
+          // record 47: its other names, and loaded or cold on its card or its server
+          aliases: m.aliases ?? [],
+          status: k.served.find(m.id)?.status ?? null,
         })),
         builtin: b.config.builtin === true,
+        server: b.config.server === true,
+        card: b.config.card ?? null,
         concurrency: b.config.concurrency,
         health: { ...b.health, queued: b.admission.queued },
       })),
@@ -581,6 +624,41 @@ async function route(
     } catch (e) {
       heldError(res, e);
     }
+  } else if (path === "/v1/servers/models" && req.method === "GET") {
+    // record 47: the models a model server offers, with their specs, given its address and a sealed key's name
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "listing a model server needs kvasir:work");
+    try {
+      json(
+        res,
+        200,
+        await servers.offered({
+          url: url.searchParams.get("url") ?? "",
+          key_ref: url.searchParams.get("key_ref") ?? undefined,
+        }),
+      );
+    } catch (e) {
+      heldError(res, e);
+    }
+  } else if (path === "/v1/servers" && req.method === "POST") {
+    // record 47: the ticked models of a model server admitted one by one on its one backend
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "adding a model server needs kvasir:work");
+    try {
+      const done = await servers.admit(JSON.parse((await readBody(req)) || "{}"), who.subject);
+      json(res, done.backend ? 201 : 422, done);
+    } catch (e) {
+      heldError(res, e);
+    }
+  } else if (/^\/v1\/backends\/[^/]+\/models\/.+$/u.test(path) && req.method === "DELETE") {
+    // record 47: one model of a backend let go; the last lets the backend go
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "removing a model needs kvasir:work");
+    const [id, model] = path
+      .slice("/v1/backends/".length)
+      .split("/models/")
+      .map((x) => decodeURIComponent(x));
+    if (held.removeModel(id, model, who.subject, (b, m) => policy.forgetModel(b, m))) {
+      res.writeHead(204);
+      res.end();
+    } else json(res, 404, { error: { code: "no_such_model", message: `${id} holds no model ${model}` } });
   } else if (path.startsWith("/v1/backends/") && req.method === "DELETE") {
     if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "removing a backend needs kvasir:work");
     const id = decodeURIComponent(path.slice("/v1/backends/".length));
@@ -730,12 +808,12 @@ async function route(
     await localDoor(req, res, path, who, local);
   } else if (path.startsWith("/v1/models/") && req.method === "GET") {
     // one model as `/v1/models` lists it, by id, served name or alias
-    const found = served.resolve(decodeURIComponent(path.slice("/v1/models/".length)));
+    const found = served.find(decodeURIComponent(path.slice("/v1/models/".length)));
     if (!found || !mayUse(who, found, served))
       json(res, 404, {
         error: { message: `no model ${path.slice("/v1/models/".length)}`, type: "invalid_request_error" },
       });
-    else json(res, 200, modelCard(found, served.default()?.model.id));
+    else json(res, 200, modelObject(found, found.id === served.default()?.id));
   } else {
     json(res, 404, {
       error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
@@ -937,6 +1015,12 @@ export async function ready(
 ): Promise<void> {
   if (backend.config.locality === "remote") return;
   await k.admissions.loadOne(backend, (b) => probeRuntime(b));
+  // a model server's models are admitted one by one as they are ticked, and never warmed: asking a cold one
+  // would load it on the server (record 47)
+  if (backend.config.server) return;
+  // a card's model is warmed by its card, and admitted where the gate holds, once it is loaded
+  const on = k.cards.of(backend);
+  if (on && (!k.backends.gate || on.card.status(on.member.id) !== "loaded")) return;
   await backend.warmup();
   if (backend.health.warming) void backend.keepWarm(undefined, (line) => say(`  ${line}`));
   if (backend.config.models.every((m) => backend.admitted.has(m.id))) return;

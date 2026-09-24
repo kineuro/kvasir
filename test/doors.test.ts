@@ -238,7 +238,8 @@ describe("the door", () => {
         key: "the-runtime-key",
         locality: "local",
         concurrency: 8,
-        warmup: false,
+        // a backend Kvasir warms is warming until its first token; one it does not warm never is (#8)
+        warmup: true,
         models: [
           {
             id: "qwen38-27b",

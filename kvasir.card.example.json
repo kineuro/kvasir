@@ -1,0 +1,59 @@
+{
+  "bind": "0.0.0.0:30000",
+  "origin": "https://models.example.org",
+  "auth": {
+    "mode": "token",
+    "tokens": {}
+  },
+  "store": "kvasir.sqlite",
+  "pepperFile": "kvasir.pepper",
+  "sealKeyFile": "kvasir.seal",
+  "admission": {
+    "queue": 8,
+    "waitCapSeconds": 60,
+    "gate": false
+  },
+  "cards": [
+    {
+      "id": "card0",
+      "driver": "docker",
+      "manage": true,
+      "minResidencySeconds": 60,
+      "idleReturnSeconds": 600,
+      "drainTimeoutSeconds": 600,
+      "startTimeoutSeconds": 1200,
+      "queueTimeoutSeconds": 1500,
+      "note": "One card holds one model at a time. Asking for the model that is not loaded swaps it in, which takes a few minutes; the default is loaded again after 10 minutes without use of the other.",
+      "models": [
+        {
+          "id": "qwen3.8-flash-next",
+          "aliases": ["flash-next"],
+          "container": "sgl-next",
+          "upstream": "http://127.0.0.1:31001",
+          "default": true,
+          "spec": {
+            "context_length": 262144,
+            "max_output_tokens": 65536,
+            "max_concurrent_requests": 4,
+            "capabilities": { "tools": true, "reasoning": true, "vision": true },
+            "license": "Qwen Community License 1.0",
+            "swap_in_seconds": 230
+          }
+        },
+        {
+          "id": "qwen38-27b",
+          "aliases": ["qwen38-27b-fast"],
+          "container": "sgl-27b",
+          "upstream": "http://127.0.0.1:31002",
+          "spec": {
+            "context_length": 262144,
+            "max_output_tokens": 65536,
+            "max_concurrent_requests": 8,
+            "capabilities": { "tools": true, "reasoning": true, "vision": true },
+            "license": "Apache-2.0"
+          }
+        }
+      ]
+    }
+  ]
+}

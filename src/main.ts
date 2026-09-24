@@ -45,13 +45,65 @@ function sayTried(tried: Tried): void {
   }
 }
 
+// `kvasir models add --server URL --key-file F [--model ID]...` (record 47): a model server's models listed
+// with their specs from its /v1/models, and the ones named admitted one by one on the server's one backend,
+// its key sealed under the backend. Without --model the list is shown and nothing is kept.
+if (args[0] === "models" && args[1] === "add" && flag("--server")) {
+  const k = build(config);
+  const keyFile = flag("--key-file");
+  const input = {
+    url: flag("--server"),
+    key: keyFile ? readFileSync(keyFile, "utf8").trim() : undefined,
+    id: flag("--id"),
+    locality: flag("--locality") ?? "local",
+    models: flags("--model"),
+  };
+  try {
+    const offer = await k.servers.offered(input);
+    if (offer.note) console.log(offer.note);
+    const loaded = offer.server?.loaded;
+    console.log(
+      `${offer.url} offers ${offer.models.length} model(s)${loaded ? `; ${loaded} is loaded` : ""}`,
+    );
+    for (const m of offer.models) {
+      const caps = [m.reasoning ? "reasoning" : "", m.tools ? "tools" : "", m.vision ? "vision" : ""]
+        .filter(Boolean)
+        .join(", ");
+      console.log(
+        `  ${m.id}${m.default ? " (default)" : ""}  ${m.status}  context ${m.context_length ?? "?"}  answer ${m.max_output_tokens ?? "?"}  ${m.max_concurrent_requests ?? "?"} at once${caps ? `  ${caps}` : ""}${m.aliases.length ? `  also ${m.aliases.join(", ")}` : ""}${m.held_by ? `  held by ${m.held_by}` : ""}`,
+      );
+    }
+    if (input.models.length === 0) {
+      console.log(
+        `nothing is added: name the models to admit with --model ID, such as kvasir models add --server ${offer.url}${keyFile ? ` --key-file ${keyFile}` : ""} --model ${offer.models.find((m) => m.default)?.id ?? offer.models[0]?.id ?? "ID"}`,
+      );
+    } else {
+      const done = await k.servers.admit(input, by, (line) => console.log(`  ${line}`));
+      for (const r of done.results)
+        console.log(
+          `${r.id}: ${!r.answered ? `did not answer (${r.error?.kind}): ${r.error?.message}` : r.admitted === null ? "held" : r.admitted ? "admitted" : "held, refused by admission"}`,
+        );
+      if (done.backend)
+        console.log(
+          `${done.backend.id} holds ${done.backend.models.join(", ")}; a Kvasir serving this database follows within seconds`,
+        );
+      if (done.results.some((r) => !r.answered || r.admitted === false)) process.exitCode = 1;
+    }
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
+  }
+  await k.close();
+  process.exit(process.exitCode ?? 0);
+}
+
 // `kvasir models list | test | add | remove` (record 23): the models this
 // database holds. A model is added only once it answered one short request;
 // a Kvasir serving the database follows within seconds, warming and admitting
 // what was added and letting go what was removed.
 if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?? "")) {
   const usage =
-    "kvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON] [--pass-through chat-completions,completions,messages,responses] [--anthropic-thinking disabled|as-sent]";
+    "kvasir models add --server URL [--key-file FILE] [--model ID]... [--id NAME] [--locality local|remote]\nkvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON] [--pass-through chat-completions,completions,messages,responses] [--anthropic-thinking disabled|as-sent]";
   const k = build(config);
   try {
     if (args[1] === "list") {
@@ -604,6 +656,8 @@ if (args[0] === "models" && args[1] === "lifecycle") {
 const k = build(config);
 // a backend added while this serves, from the desk or the command line, is admitted and warmed here
 k.held.onAdded = (backend) => void ready(k, backend);
+// a card's model, once loaded, is admitted where it has no record and the gate holds (record 47)
+k.cards.onLoaded = (backend) => void ready(k, backend);
 // the admitted sets from the records, against the runtime each backend reports now (§8.6)
 await k.admissions.load(k.backends, (b) => probeRuntime(b));
 const address = await listen(k, config.bind);
@@ -623,13 +677,27 @@ for (const b of added) {
     b.config.locality === "remote"
       ? ""
       : `, admitted: ${[...b.admitted].join(", ") || `none (kvasir admission run --backend ${b.config.id})`}`;
-  const again = b.config.warmup === false ? "" : ", trying again";
-  console.log(
-    `  ${b.config.id}: ${b.health.warming ? `still warming (${b.health.lastError ?? "no first token yet"})${again}` : "warm"}${admitted}`,
-  );
+  const on = k.cards.of(b);
+  // a backend Kvasir does not warm is cold until a request reaches it (#8); a card's model is its card's
+  const state = on
+    ? `on ${on.card.id}`
+    : b.health.warming
+      ? `still warming (${b.health.lastError ?? "no first token yet"}), trying again`
+      : b.health.firstTokenAt || b.config.locality === "remote"
+        ? "warm"
+        : "not warmed";
+  console.log(`  ${b.config.id}: ${state}${admitted}`);
   if (b.health.warming) void b.keepWarm(undefined, (line) => console.log(`  ${line}`));
 }
 k.held.watch();
+// the cards adopt the model already running, or load their default, and swap on request (record 47)
+for (const card of k.cards.list)
+  console.log(
+    `  ${card.id}: ${card.config.driver.kind}, ${[...card.members.keys()].join(", ")}; default ${card.default}${card.config.manage ? "" : "; watched, never started or stopped"}`,
+  );
+void k.cards.start((line) => console.log(`  ${line}`));
+// what each model server held as a backend says of its models, loaded or cold, every 30 seconds
+k.servers.watch();
 // local model downloads left queued or downloading when Kvasir last closed carry on, one model at a time (record 23)
 k.local.say = (line) => console.log(`  ${line}`);
 const carrying = k.local.start();

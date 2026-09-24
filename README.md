@@ -64,6 +64,17 @@ node dist/main.js local download --repo OWNER/NAME --include "*Q4_K_M.gguf" --co
 node dist/main.js local list --config kvasir.json
 ```
 
+## A card, and a model server as a backend
+
+A Kvasir with `cards` in its configuration serves a group of models that share one GPU, one loaded at a time, as `kvasir.card.example.json` shows. Asking for the model that is not loaded swaps it in: Kvasir lets the running requests finish, stops the loaded model, starts the other and waits for its health, and goes back to the default after a while without use. The models run as SGLang containers Kvasir starts and stops by name (`"driver": "docker"`), or as presets of a llama.cpp router (`"driver": "llama-router"`). `GET /health` says which model is loaded.
+
+Another Kvasir uses such a server as one backend, by its address and key. It lists the models with their specs, and admits the ones you name one by one:
+
+```sh
+node dist/main.js models add --server https://models.example.org/v1 --key-file server.key --config kvasir.json
+node dist/main.js models add --server https://models.example.org/v1 --key-file server.key --model qwen38-27b --config kvasir.json
+```
+
 ## License
 
 AGPL-3.0-only, under the same [contributor license agreement](CLA.md) as the engine. See [CONTRIBUTING.md](CONTRIBUTING.md).

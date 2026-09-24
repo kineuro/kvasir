@@ -136,6 +136,13 @@ export function described(
       contextWindow: whole(m.contextWindow ?? m.context_window, 32_768, "contextWindow"),
       maxTokens: whole(m.maxTokens ?? m.max_tokens, 4_096, "maxTokens"),
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      // what a model server said of the model (record 47): its other names and its specs
+      ...(Array.isArray(m.aliases) && m.aliases.some((a) => typeof a === "string")
+        ? { aliases: m.aliases.filter((a): a is string => typeof a === "string" && a !== id) }
+        : {}),
+      ...(m.spec && typeof m.spec === "object" && !Array.isArray(m.spec)
+        ? { spec: m.spec as Record<string, unknown> }
+        : {}),
     });
   }
   const named = typeof o.id === "string" && o.id.trim() !== "";
@@ -146,6 +153,7 @@ export function described(
     throw bad("concurrency: the streams admitted at once, from 1 to 256");
   const config: BackendConfig = { id, kind, baseUrl, locality, concurrency, models };
   if (locality === "local") config.warmup = o.warmup !== false;
+  if (o.server === true) config.server = true;
   if (o.inlineReasoning !== undefined) {
     if (!["off", "markers", "open"].includes(String(o.inlineReasoning)))
       throw bad("inlineReasoning: off, markers or open");
@@ -361,9 +369,10 @@ export class Held {
         return backend;
       });
     const kept = new Set(rows.map((r) => r.config.id));
-    // Kvasir's own backends are never stored, so never let go for being absent from the rows
+    // Kvasir's own backends and a card's models (kvasir.json's) are never stored, so never let go for being
+    // absent from the rows
     const removed = this.backends.list
-      .filter((b) => !b.config.builtin)
+      .filter((b) => !b.config.builtin && !b.config.card)
       .map((b) => b.config.id)
       .filter((id) => !kept.has(id));
     for (const id of removed) this.backends.remove(id);
@@ -432,6 +441,9 @@ export class Held {
   replace(config: BackendConfig, by: string, key: string | null = null): Backend {
     this.sync();
     if (config.id === HUGGING_FACE) throw reserved();
+    const served = this.backends.get(config.id)?.config;
+    if (served?.card || served?.builtin)
+      throw new HeldRefused(409, `${config.id} is a backend of Kvasir's own, not one an admin holds`);
     if (!this.backends.get(config.id)) {
       const backend = this.put(config, by, key);
       this.onAdded(backend);
@@ -504,9 +516,32 @@ export class Held {
     return { backend, tried, note };
   }
 
+  /**
+   * One model of a backend let go (record 47), as an admin unticks one model of a server: the backend held
+   * again without it, and the policy rows that named it keep the backend; the last model lets the backend go.
+   */
+  removeModel(
+    id: string,
+    model: string,
+    by: string,
+    forgetModel: (backend: string, model: string) => void,
+  ): boolean {
+    this.sync();
+    const served = this.backends.get(id);
+    if (!served || served.config.builtin || served.config.card) return false;
+    const entry = served.config.models.find((m) => m.id === model || m.aliases?.includes(model));
+    if (!entry) return false;
+    const models = served.config.models.filter((m) => m !== entry);
+    if (models.length === 0) return this.remove(id);
+    this.replace({ ...served.config, models }, by);
+    forgetModel(id, entry.id);
+    return true;
+  }
+
   /** A backend let go: its row, its key and the policy rows naming it go; its streams already running finish. */
   remove(id: string): boolean {
-    if (this.backends.get(id)?.config.builtin) return false;
+    const own = this.backends.get(id)?.config;
+    if (own?.builtin || own?.card) return false;
     const had = this.store.db.prepare("DELETE FROM backend WHERE id = ?").run(id).changes > 0;
     const served = this.backends.remove(id);
     if (!had && !served) return false;
