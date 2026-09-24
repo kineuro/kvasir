@@ -66,7 +66,7 @@ node dist/main.js local list --config kvasir.json
 
 ## A card, and a model server as a backend
 
-A Kvasir with `cards` in its configuration serves a group of models that share one GPU, one loaded at a time, as `kvasir.card.example.json` shows. Asking for the model that is not loaded swaps it in: Kvasir lets the running requests finish, stops the loaded model, starts the other and waits for its health, and goes back to the default after a while without use. The models run as SGLang containers Kvasir starts and stops by name (`"driver": "docker"`), or as presets of a llama.cpp router (`"driver": "llama-router"`). `GET /health` says which model is loaded.
+A Kvasir with `cards` in its configuration serves a group of models that share one GPU, one loaded at a time, as `kvasir.card.example.json` shows. Asking for the model that is not loaded swaps it in: Kvasir lets the running requests finish, stops the loaded model, starts the other and waits for its health, and goes back to the default after a while without use. The models run as SGLang containers Kvasir starts and stops by name (`"driver": "docker"`), or as presets of a llama.cpp router (`"driver": "llama-router"`). `GET /health` says which model is loaded. A card's models answer the pass-through doors above; a request for the cold one waits out the swap with its headers sent early, and a key made with `--no-swap` is refused it instead (409).
 
 Another Kvasir uses such a server as one backend, by its address and key. It lists the models with their specs, and admits the ones you name one by one:
 

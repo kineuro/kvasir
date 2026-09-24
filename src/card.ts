@@ -22,7 +22,7 @@ import type { Backend, Backends } from "./backends.js";
 import type { CardConfig, CardMemberConfig } from "./card-config.js";
 import type { BackendConfig, ModelEntry } from "./config.js";
 import { LlamaRouter } from "./runtime.js";
-import { type ServedServer, type ServedStatus, specOf } from "./served.js";
+import { PROTOCOLS, type ServedServer, type ServedStatus, specOf } from "./served.js";
 
 export type { CardConfig, CardMemberConfig } from "./card-config.js";
 
@@ -523,7 +523,11 @@ export function entryOf(m: CardMemberConfig): ModelEntry {
   };
 }
 
-/** The backend a card member is served as: local, not warmed by a prompt (the card asks its health), its concurrency from its specs. */
+/**
+ * The backend a card member is served as: local, not warmed by a prompt (the card asks its health), its
+ * concurrency from its specs, and the pass-through doors its server speaks natively: all four on SGLang, and
+ * on llama.cpp's server every one but OpenAI's responses.
+ */
 export function memberBackend(card: CardConfig, m: CardMemberConfig): BackendConfig {
   return {
     id: m.backend,
@@ -534,6 +538,9 @@ export function memberBackend(card: CardConfig, m: CardMemberConfig): BackendCon
     models: [entryOf(m)],
     warmup: false,
     card: card.id,
+    passThrough:
+      card.driver.kind === "llama-router" ? PROTOCOLS.filter((p) => p !== "responses") : [...PROTOCOLS],
+    anthropicThinking: card.anthropicThinking,
   };
 }
 

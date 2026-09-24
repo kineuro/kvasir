@@ -44,6 +44,11 @@ export interface CardConfig {
   queueTimeoutSeconds: number;
   /** A sentence for clients, shown beside the list. */
   note: string;
+  /**
+   * An Anthropic `/v1/messages` request without `thinking` (modelgate's `anthropic_thinking_default`):
+   * `disabled`, the default, sends it on as thinking disabled; `as-sent` leaves it to the model.
+   */
+  anthropicThinking: "disabled" | "as-sent";
   models: CardMemberConfig[];
 }
 
@@ -143,6 +148,9 @@ export function cardsOf(value: unknown, runtime: { url: string } | null): CardCo
     const defaults = models.filter((m) => m.default);
     if (defaults.length > 1) throw bad(`${id}: one default model, not ${defaults.length}`);
     if (defaults.length === 0) models[0].default = true;
+    const thinking = c.anthropicThinking ?? "disabled";
+    if (thinking !== "disabled" && thinking !== "as-sent")
+      throw bad(`${id}: anthropicThinking is disabled or as-sent`);
     cards.push({
       id,
       driver,
@@ -153,6 +161,7 @@ export function cardsOf(value: unknown, runtime: { url: string } | null): CardCo
       startTimeoutSeconds: seconds("startTimeoutSeconds", 1200),
       queueTimeoutSeconds: seconds("queueTimeoutSeconds", 1500),
       note: typeof c.note === "string" ? c.note : "",
+      anthropicThinking: thinking,
       models,
     });
   }

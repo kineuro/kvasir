@@ -18,6 +18,15 @@
 // set `stream_options` is sent with `include_usage`, and the usage-only event
 // that asks for is taken out of the stream again, so the client reads what it
 // would have read and the ledger still has the counts.
+//
+// A wait for a card's swap takes minutes. No client is left without headers
+// that long: a stream gets its headers at the first second of waiting and
+// `: queued` each second after; a whole answer gets its headers after
+// `WHOLE_HEADERS_AFTER_MS` (status 200, JSON) and a newline each keep-alive
+// interval, which a JSON parser skips, so neither Node's fetch, which gives up
+// on headers after 300 seconds, nor a client's read timeout ends it. A whole
+// answer that fails after its headers went says so in its body, in the door's
+// own error shape.
 
 import type { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { request as httpRequest } from "node:http";
@@ -42,6 +51,9 @@ import {
  */
 export const BYTES_PER_TOKEN = 6;
 
+/** How long a whole (not streamed) answer waits without headers before Kvasir sends its own. */
+export const WHOLE_HEADERS_AFTER_MS = 30_000;
+
 /** Headers that belong to one hop, or to Kvasir, and are never forwarded. */
 const HOP = new Set([
   "connection",
@@ -65,6 +77,8 @@ export interface PassContext {
   ledger: Ledger;
   who: Principal;
   keepAliveMs?: number;
+  /** How long a whole answer waits without headers before Kvasir sends its own; WHOLE_HEADERS_AFTER_MS when absent. */
+  wholeHeadersAfterMs?: number;
   /** The door that translates through pi-ai, for a chat request whose model no backend answers natively. */
   translate?: (text: string) => Promise<void>;
 }
@@ -76,6 +90,13 @@ export function mayUse(who: Principal, model: ServedModel, served: ServedCatalog
   return names.some((n) => served.find(n)?.id === model.id);
 }
 
+/** An error body in the door's own shape: Anthropic's on messages, OpenAI's elsewhere. */
+function errorBody(protocol: Protocol, type: string, code: string, message: string): Record<string, unknown> {
+  return protocol === "messages"
+    ? { type: "error", error: { type, message } }
+    : { error: { message, type, code } };
+}
+
 /** A refusal in the door's own shape: Anthropic's on messages, OpenAI's elsewhere. */
 function refuse(
   res: ServerResponse,
@@ -85,8 +106,7 @@ function refuse(
   code: string,
   message: string,
 ): void {
-  if (protocol === "messages") json(res, status, { type: "error", error: { type, message } });
-  else json(res, status, { error: { message, type, code } });
+  json(res, status, errorBody(protocol, type, code, message));
 }
 
 /** A rough, low count of a request's input tokens: its text, never its images. */
@@ -365,13 +385,14 @@ export async function passThrough(
       "not_on_this_door",
       `${model.id} is not served on ${path}; its backend speaks ${model.protocols.join(", ") || "none of the pass-through doors"}`,
     );
-  // a key that may not cause a swap is kept off a model that is not loaded (record 47, K2)
-  if (model.status !== "loaded" && who.client && !who.client.swap)
+  // a key made with --no-swap is refused a request that would swap the card, rather than queued behind the
+  // swap (record 47, K2); a model being loaded already, or loaded, costs no swap of its own
+  if (model.status === "cold" && who.client && !who.client.swap)
     return refused(
-      403,
-      "permission_error",
-      "may_not_swap",
-      `${model.id} is not loaded, and this key may not load a model in place of the one that is`,
+      409,
+      protocol === "messages" ? "invalid_request_error" : "conflict",
+      "would_swap",
+      `${model.id} is not loaded${model.card ? ` on ${model.card}` : ""}, and this key may not cause a swap to load it; ask for the loaded model (GET /v1/models says which), or use a key that may swap`,
     );
   // the two changes: the name the backend serves the model by, and Anthropic's thinking default
   body.model = model.upstream;
@@ -402,11 +423,13 @@ export async function passThrough(
     if (!res.writableFinished) upstreamAbort.abort();
   });
   // a stream that waits (a queue, a swap) gets its headers now and a comment each second, so no client
-  // gives up on a response that says nothing; a whole answer waits with no headers, as modelgate did
+  // gives up on a response that says nothing; a whole answer gets its headers after a while and a newline
+  // each keep-alive interval, which a JSON parser skips
   let committed = false;
   const kept: { alive: ReturnType<typeof keepAlive> | null } = { alive: null };
   const touch = () => kept.alive?.touch();
   const quiet = () => kept.alive?.stop();
+  const keepAliveMs = ctx.keepAliveMs ?? KEEP_ALIVE_MS;
   const commit = (status = 200, headers: OutgoingHttpHeaders = {}) => {
     committed = true;
     res.writeHead(status, {
@@ -415,8 +438,20 @@ export async function passThrough(
       ...headers,
       "x-model": model.id,
     });
-    kept.alive = keepAlive(res, ctx.keepAliveMs ?? KEEP_ALIVE_MS);
+    kept.alive = keepAlive(res, keepAliveMs);
   };
+  const commitWhole = () => {
+    if (committed || res.writableEnded || res.destroyed) return;
+    committed = true;
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "cache-control": "no-cache",
+      "x-model": model.id,
+    });
+    res.write("\n");
+    kept.alive = keepAlive(res, keepAliveMs, "\n");
+  };
+  const holding = stream ? null : setTimeout(commitWhole, ctx.wholeHeadersAfterMs ?? WHOLE_HEADERS_AFTER_MS);
   let lease: Lease;
   try {
     lease = await ctx.served.lease(model, {
@@ -440,7 +475,12 @@ export async function passThrough(
         refusal: { layer: "health", fact: r.message },
         totalMs: Date.now() - started,
       });
-    if (committed) {
+    if (holding) clearTimeout(holding);
+    if (committed && !stream) {
+      res.write(JSON.stringify(errorBody(protocol, "overloaded_error", r.code, r.message)));
+      quiet();
+      res.end();
+    } else if (committed) {
       res.write(errorEvent(protocol, "overloaded_error", r.message));
       quiet();
       res.end();
@@ -477,6 +517,7 @@ export async function passThrough(
       upstreamAbort.signal,
     );
     if (early) clearTimeout(early);
+    if (holding) clearTimeout(holding);
     const status = up.statusCode ?? 502;
     if (status < 400) lease.answered?.();
     const sse = String(up.headers["content-type"] ?? "").includes("text/event-stream");
@@ -512,10 +553,20 @@ export async function passThrough(
         }
       } else outcome = "error";
       if (committed) {
-        // the headers went while the request waited: the answer is an event
-        if (status >= 400)
-          res.write(errorEvent(protocol, "api_error", `the backend answered ${status}`, answer));
-        else res.write(`data: ${answer}\n\n`);
+        // the headers went while the request waited (200, JSON): the answer follows the newlines as it came,
+        // and an error the backend answered is the body, in the door's own shape where it was not JSON
+        let parsed = false;
+        try {
+          JSON.parse(answer);
+          parsed = true;
+        } catch {
+          parsed = false;
+        }
+        res.write(
+          parsed
+            ? answer
+            : JSON.stringify(errorBody(protocol, "api_error", "backend", `the backend answered ${status}`)),
+        );
       } else {
         const headers = {
           ...answered(up.headers),
@@ -532,11 +583,14 @@ export async function passThrough(
     if (outcome === "error") {
       const message = "the backend did not answer";
       console.error(`kvasir: ${model.id} on ${lease.backend}: ${e instanceof Error ? e.message : e}`);
-      if (committed) res.write(errorEvent(protocol, "api_error", message));
+      if (committed && !stream)
+        res.write(JSON.stringify(errorBody(protocol, "api_error", "backend", message)));
+      else if (committed) res.write(errorEvent(protocol, "api_error", message));
       else if (!res.headersSent) refuse(res, protocol, 502, "api_error", "backend", message);
     }
   } finally {
     if (early) clearTimeout(early);
+    if (holding) clearTimeout(holding);
     lease.release();
     quiet();
     if (!res.writableEnded) res.end();

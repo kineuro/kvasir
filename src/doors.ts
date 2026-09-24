@@ -39,12 +39,17 @@ export const KEEP_ALIVE_MS = 15_000;
  * A comment is no event to any reader of a stream. `touch` marks a write;
  * `stop` ends it, as does the response closing.
  */
-export function keepAlive(res: ServerResponse, everyMs: number): { touch: () => void; stop: () => void } {
+export function keepAlive(
+  res: ServerResponse,
+  everyMs: number,
+  /** What keeps it: an SSE comment, or whitespace in a JSON answer whose headers went early. */
+  beat = ": ping\n\n",
+): { touch: () => void; stop: () => void } {
   let last = Date.now();
   const timer = setInterval(
     () => {
       if (res.writableEnded || res.destroyed || Date.now() - last < everyMs) return;
-      res.write(": ping\n\n");
+      res.write(beat);
       last = Date.now();
     },
     Math.max(20, Math.min(1_000, Math.floor(everyMs / 4))),

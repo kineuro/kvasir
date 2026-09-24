@@ -81,6 +81,8 @@ export function build(
     runtime?: RunnerOptions;
     /** How long a stream may say nothing before a comment keeps it; the doors' 15 seconds when absent. */
     keepAliveMs?: number;
+    /** How long a whole pass-through answer waits without headers before Kvasir sends its own; 30 s when absent. */
+    wholeHeadersAfterMs?: number;
     /** The driver of each card, for a test; Docker or the llama.cpp router, as kvasir.json says, otherwise. */
     cardDriver?: (c: CardConfig) => CardDriver;
     /** The times of each card, for a test; kvasir.json's otherwise. */
@@ -253,6 +255,7 @@ export function build(
         servers,
         served,
         keepAliveMs: options.keepAliveMs,
+        wholeHeadersAfterMs: options.wholeHeadersAfterMs,
       });
     } catch (e) {
       if (!res.headersSent)
@@ -381,6 +384,7 @@ async function route(
     servers: Servers;
     served: ServedCatalog;
     keepAliveMs?: number;
+    wholeHeadersAfterMs?: number;
   },
 ): Promise<void> {
   const {
@@ -407,6 +411,7 @@ async function route(
       ledger,
       who,
       keepAliveMs: k.keepAliveMs,
+      wholeHeadersAfterMs: k.wholeHeadersAfterMs,
       translate,
     });
   if (path === "/v1/config" && req.method === "GET") {
