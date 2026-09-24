@@ -247,6 +247,26 @@ describe("the card", () => {
     leaveB();
   });
 
+  it("beats every second while a request waits, even when the card wakes it just before a beat is due", async () => {
+    const { k } = await kvasirWithCard({}, { startMs: { "sgl-a": 50, "sgl-b": 2_500 } });
+    await k.cards.start();
+    const card = k.cards.list[0];
+    const leaveA = await card.enter("model-a");
+    const t0 = Date.now();
+    const beats: number[] = [];
+    const toB = card.enter("model-b", () => beats.push(Date.now() - t0));
+    // A's request ends most of a second into B's wait: the drain wakes B's waiter before its first beat was due
+    await sleep(700);
+    leaveA();
+    const leaveB = await toB;
+    leaveB();
+    expect(card.loaded).toBe("model-b");
+    // a beat each second from the start of the wait, not a second from the last wake
+    expect(beats.length).toBeGreaterThanOrEqual(2);
+    expect(beats[0]).toBeLessThan(1_400);
+    for (let i = 1; i < beats.length; i += 1) expect(beats[i] - beats[i - 1]).toBeLessThan(1_400);
+  });
+
   it("falls back to the default when a model does not start, and tells its waiter", async () => {
     const { k, url, docker } = await kvasirWithCard({}, { dies: ["sgl-b"] });
     await k.cards.start();

@@ -425,8 +425,11 @@ describe("modelgate's smoke sequence through a card", () => {
       messages: [{ role: "user", content: "Count." }],
     });
     expect(r.status).toBe(200);
+    // the first `: queued` is due one second into the wait, so the headers come a second before the model
+    // is up (a beat once slipped to the second second, and these bounds met at 2001 ms)
     expect(r.headersMs).toBeLessThan(START_MS - 500);
     expect(r.totalMs).toBeGreaterThanOrEqual(START_MS);
+    expect(r.totalMs - r.headersMs).toBeGreaterThanOrEqual(500);
     expect(r.text.startsWith(": queued\n\n")).toBe(true);
     expect(r.text).toContain('"content":" 3"');
     expect(r.text.trimEnd().endsWith("data: [DONE]")).toBe(true);
