@@ -12,6 +12,7 @@ import { BACKEND_KINDS, type BackendConfig, type BackendKind, type ModelEntry } 
 import type { Credentials } from "./credentials.js";
 import { CLASSES } from "./keys.js";
 import { HUGGING_FACE } from "./local.js";
+import { PROTOCOLS, type Protocol } from "./served.js";
 import type { Store } from "./store.js";
 
 export const HELD_SCHEMA = `CREATE TABLE IF NOT EXISTS backend (
@@ -164,6 +165,19 @@ export function described(
   if (o.classes !== undefined) {
     if (!CLASSES.includes(o.classes as never)) throw bad(`classes: one of ${CLASSES.join(", ")}`);
     config.classes = o.classes as BackendConfig["classes"];
+  }
+  // record 47: the doors the backend speaks natively, forwarded as the client sent them
+  const through = o.passThrough ?? o.pass_through;
+  if (through !== undefined) {
+    const list = typeof through === "string" ? through.split(",").map((x) => x.trim()) : through;
+    if (!Array.isArray(list) || !list.every((x) => PROTOCOLS.includes(x as Protocol)))
+      throw bad(`passThrough: any of ${PROTOCOLS.join(", ")}`);
+    if (list.length > 0) config.passThrough = [...new Set(list as Protocol[])];
+  }
+  if (o.anthropicThinking !== undefined) {
+    if (o.anthropicThinking !== "disabled" && o.anthropicThinking !== "as-sent")
+      throw bad("anthropicThinking: disabled or as-sent");
+    config.anthropicThinking = o.anthropicThinking;
   }
   const key = typeof o.key === "string" && o.key.trim() ? o.key.trim() : null;
   return { config, key, named, note };

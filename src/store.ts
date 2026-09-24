@@ -66,6 +66,10 @@ export class Store {
     // a second Kvasir on the database, such as the command line beside a server, waits its turn to write rather than failing
     this.db.exec("PRAGMA busy_timeout = 5000");
     for (const s of SCHEMA) this.db.exec(s);
+    // record 47: the client key a ledger row was spent under, for the ledger per key
+    if (!this.columns("ledger").includes("client_key"))
+      this.db.exec("ALTER TABLE ledger ADD COLUMN client_key TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS ledger_client ON ledger (client_key, at)");
   }
 
   columns(table: string): string[] {

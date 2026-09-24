@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The doors of §8.2: pi-messages (primary), the OpenAI-shaped secondary,
-// the catalog, health.
+// The doors of §8.2: pi-messages (primary, at /v1/pi/messages since record
+// 47), the OpenAI-shaped secondary through pi-ai, the catalog, health. The
+// doors that pass a request through as it came are in src/passthrough.ts.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AssistantMessageEvent, Context } from "@earendil-works/pi-ai";
@@ -231,7 +232,11 @@ function decide(
   return { ok: true, found, granted, purpose };
 }
 
-/** `POST /v1/messages`: `{model, context, options}` in, the event stream out, one ledger row. */
+/**
+ * `POST /v1/pi/messages`: `{model, context, options}` in, the event stream out,
+ * one ledger row. Until record 47 it was `POST /v1/messages`, which still takes
+ * a pi-messages body for one release; `body` is the body that door already read.
+ */
 export async function piMessages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -240,12 +245,12 @@ export async function piMessages(
   ledger: Ledger,
   policy: Policy,
   whose: Whose,
-  opts: { keepAliveMs?: number } = {},
+  opts: { keepAliveMs?: number; body?: string } = {},
 ): Promise<void> {
   const { subject, subscriber } = whose;
   let body: { model?: string; context?: Context; options?: Record<string, unknown> };
   try {
-    body = JSON.parse(await readBody(req));
+    body = JSON.parse(opts.body ?? (await readBody(req)));
   } catch (e) {
     json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : "not JSON" } });
     return;
@@ -459,8 +464,9 @@ function emptyUsage() {
 }
 
 /**
- * `POST /v1/chat/completions`: the OpenAI shape for a notebook or a script
- * (§8.2). It goes the way the messages door goes: the purpose and the policy
+ * `POST /v1/chat/completions` through pi-ai: the OpenAI shape for a notebook or
+ * a script (§8.2), for a model whose backend is not one that answers the door
+ * natively (record 47 forwards those as they are). It goes the way the messages door goes: the purpose and the policy
  * decide where the call may run, it waits its turn in the backend's queue,
  * and it is one ledger row.
  */
@@ -472,7 +478,7 @@ export async function chatCompletions(
   ledger: Ledger,
   policy: Policy,
   whose: Whose,
-  opts: { keepAliveMs?: number } = {},
+  opts: { keepAliveMs?: number; body?: string } = {},
 ): Promise<void> {
   const { subject, subscriber } = whose;
   let body: {
@@ -483,7 +489,7 @@ export async function chatCompletions(
     max_tokens?: number;
   };
   try {
-    body = JSON.parse(await readBody(req));
+    body = JSON.parse(opts.body ?? (await readBody(req)));
   } catch (e) {
     json(res, 400, {
       error: { message: e instanceof Error ? e.message : "not JSON", type: "invalid_request_error" },

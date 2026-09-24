@@ -8,7 +8,8 @@ import { Admissions } from "./admission-records.js";
 import { Auth, type Grant, holds, type Principal, Refused } from "./auth.js";
 import { type Backend, Backends } from "./backends.js";
 import { chatgptAuth, chatgptBackend, chatgptModels } from "./chatgpt.js";
-import { type Config, pepper } from "./config.js";
+import { ClientRefused, Clients } from "./clients.js";
+import { type Config, isPublic, pepper } from "./config.js";
 import { Credentials, openSeal } from "./credentials.js";
 import { chatCompletions, json, piMessages, readBody, type Whose } from "./doors.js";
 import { described, Held, HeldRefused, tryBackend } from "./held.js";
@@ -16,8 +17,10 @@ import { CLASSES, type ContentClass, Keys } from "./keys.js";
 import { Ledger } from "./ledger.js";
 import { Lifecycle, LifecycleRefused, parseSource } from "./lifecycle.js";
 import { Local, type LocalOptions, LocalRefused } from "./local.js";
+import { mayUse, passThrough } from "./passthrough.js";
 import { type Need, Policy, Refused as PolicyRefused } from "./policy.js";
 import { Runner, type RunnerOptions } from "./runtime.js";
+import { DOORS, heldSource, modelCard, Served } from "./served.js";
 import { Store } from "./store.js";
 import { CHATGPT, type SubscriptionAuth, Subscriptions, SYSTEM } from "./subscriptions.js";
 import { measureOverhead, probeRuntime, runSuite } from "./suite.js";
@@ -31,6 +34,10 @@ export interface Kvasir {
   backends: Backends;
   store: Store;
   keys: Keys;
+  /** Client keys (record 47): the keys of the doors that pass a request through. */
+  clients: Clients;
+  /** The models the pass-through doors and `GET /v1/models` serve (record 47); a card registers here. */
+  served: Served;
   ledger: Ledger;
   auth: Auth;
   credentials: Credentials;
@@ -53,6 +60,8 @@ export interface Kvasir {
     opts?: { overhead?: boolean; log?: (line: string) => void },
   ) => Promise<import("./suite.js").AdmissionRecord[]>;
   server: Server;
+  /** The listener of the public doors alone (record 47), bound where kvasir.json names `public.bind`. */
+  publicServer: Server;
   address: () => string;
   close: () => Promise<void>;
 }
@@ -70,8 +79,13 @@ export function build(
   const store = new Store(config.store);
   const backends = new Backends(config.admission);
   const keys = new Keys(store, pepper(config.pepperFile));
+  const clients = new Clients(store);
   const ledger = new Ledger(store);
-  const auth = new Auth(config.auth, keys);
+  const auth = new Auth(config.auth, keys, clients);
+  // a client key's ledger rows are kept for as many days as kvasir.json says (record 47, R8)
+  ledger.prune(config.clients.ledgerDays);
+  const pruning = setInterval(() => ledger.prune(config.clients.ledgerDays), 3_600_000);
+  pruning.unref();
   const seal = openSeal(config.sealKeyFile);
   const credentials = new Credentials(store, seal);
   const policy = new Policy(store, config.purposes, backends);
@@ -101,6 +115,9 @@ export function build(
   backends.add(chatgptBackend(backends, subscriptions));
   policy.subscribed = (subject) => subscriptions.has(subject);
   policy.subscriptionModel = (subject) => subscriptions.model(subject);
+  // what the pass-through doors serve: the held backends, and a card where one registers first (record 47)
+  const served = new Served();
+  served.register(heldSource(backends));
   const admissions = new Admissions(store);
   const lifecycle = new Lifecycle(store);
   // a promoted candidate is the model the purposes route to on its backend
@@ -134,9 +151,17 @@ export function build(
     }
     return out;
   };
-  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const handle = (surface: "all" | "public") => async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://kvasir");
     const path = url.pathname.replace(/\/+$/u, "") || "/";
+    const open = isPublic(config.public.doors, req.method ?? "", path);
+    // the public listener answers the doors meant for the public route and no other (record 47, R6)
+    if (surface === "public" && !open) {
+      json(res, 404, {
+        error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
+      });
+      return;
+    }
     if (path === "/healthz" && req.method === "GET") {
       json(res, 200, {
         ok: true,
@@ -156,17 +181,34 @@ export function build(
     } catch (e) {
       if (e instanceof Refused) {
         json(res, e.status, {
-          error: { code: e.status === 401 ? "unauthenticated" : "no_grant", message: e.message },
+          error: {
+            code: e.status === 401 ? "unauthenticated" : "no_grant",
+            type: e.status === 401 ? "authentication_error" : "permission_error",
+            message: e.message,
+          },
         });
         return;
       }
       throw e;
+    }
+    // a client key opens the doors meant for clients, wherever it calls
+    if (who.client && !open) {
+      json(res, 403, {
+        error: {
+          code: "not_public",
+          type: "permission_error",
+          message: `a client key opens only the doors meant for clients: ${config.public.doors.join(", ")}`,
+        },
+      });
+      return;
     }
     try {
       await route(req, res, path, url, who, {
         config,
         backends,
         keys,
+        clients,
+        served,
         ledger,
         credentials,
         held,
@@ -185,12 +227,16 @@ export function build(
       else res.end();
       console.error("kvasir:", e instanceof Error ? e.message : e);
     }
-  });
+  };
+  const server = createServer(handle("all"));
+  const publicServer = createServer(handle("public"));
   const k: Kvasir = {
     config,
     backends,
     store,
     keys,
+    clients,
+    served,
     ledger,
     auth,
     credentials,
@@ -203,6 +249,7 @@ export function build(
     lifecycle,
     admit,
     server,
+    publicServer,
     address: () => {
       const a = server.address();
       return typeof a === "object" && a ? `http://${a.address}:${a.port}` : "";
@@ -211,10 +258,12 @@ export function build(
       // a warm-up still being tried, and the following of the database, end with the server; a download
       // stops with what it has, to carry on when Kvasir starts again
       held.unwatch();
+      clearInterval(pruning);
       for (const b of backends.list) b.stop();
       await runner?.close();
       await local.stop();
       await new Promise<void>((done) => server.close(() => done()));
+      if (publicServer.listening) await new Promise<void>((done) => publicServer.close(() => done()));
       store.close();
     },
   };
@@ -236,7 +285,7 @@ async function* viaDoor(
       ? Object.keys((config.auth as { tokens?: Record<string, string> }).tokens ?? {})[0]
       : undefined;
   if (first) headers.authorization = `Bearer ${first}`;
-  const r = await fetch(`${origin}/v1/messages`, {
+  const r = await fetch(`${origin}/v1/pi/messages`, {
     method: "POST",
     headers,
     body: JSON.stringify({ model, context, options: { maxTokens, temperature: 0 } }),
@@ -281,6 +330,8 @@ async function route(
     config: Config;
     backends: Backends;
     keys: Keys;
+    clients: Clients;
+    served: Served;
     ledger: Ledger;
     credentials: Credentials;
     held: Held;
@@ -298,6 +349,8 @@ async function route(
     config,
     backends,
     keys,
+    clients,
+    served,
     ledger,
     credentials,
     held,
@@ -309,21 +362,101 @@ async function route(
     lifecycle,
   } = k;
   const { admit } = k;
+  // the pass-through doors (record 47): the request as the client sent it, to a backend that speaks it
+  const pass = (text: string, translate?: (text: string) => Promise<void>) =>
+    passThrough(req, res, path, url.search, text, {
+      served,
+      ledger,
+      who,
+      keepAliveMs: k.keepAliveMs,
+      translate,
+    });
   if (path === "/v1/config" && req.method === "GET") {
-    json(res, 200, { ...backends.catalog(config.origin), kvasir: { version: VERSION } });
+    // pi's model store streams to `${baseUrl}/messages`: the pi-messages door (record 47)
+    json(res, 200, {
+      ...backends.catalog(config.origin),
+      baseUrl: `${config.origin}/v1/pi`,
+      kvasir: { version: VERSION },
+    });
   } else if (path === "/v1/models" && req.method === "GET") {
-    const models = backends
-      .catalog(config.origin)
-      .models.map((m) => ({ id: m.id, object: "model", owned_by: m.backend }));
-    json(res, 200, { object: "list", data: models });
-  } else if (path === "/v1/messages" && req.method === "POST") {
+    // modelgate's shape (record 47): each model with its aliases, whether it is the default and loaded, and its specs
+    const all = served.list().filter((f) => mayUse(who, f, served));
+    const defaultId = served.default()?.model.id;
+    const server = served.server();
+    json(res, 200, {
+      object: "list",
+      data: all.map((f) => modelCard(f, defaultId)),
+      ...(server ? { server } : {}),
+    });
+  } else if (path === "/v1/pi/messages" && req.method === "POST") {
     const whose = await streamSubject(req, res, who, auth, config);
     if (whose !== null)
       await piMessages(req, res, backends, who, ledger, policy, whose, { keepAliveMs: k.keepAliveMs });
+  } else if (path === "/v1/messages" && req.method === "POST") {
+    // for one release the old path serves both: a body with pi's `context` and no `messages` is
+    // pi-messages, which has moved to /v1/pi/messages; anything else is Anthropic's (record 47, R2)
+    const text = await readBody(req, PASS_LIMIT);
+    if (piShaped(text)) {
+      if (who.client) {
+        json(res, 403, {
+          error: {
+            code: "not_public",
+            type: "permission_error",
+            message: "pi-messages is NILS's own door; a client key sends Anthropic's messages here",
+          },
+        });
+        return;
+      }
+      res.setHeader("deprecation", "true");
+      res.setHeader("link", '</v1/pi/messages>; rel="successor-version"');
+      const whose = await streamSubject(req, res, who, auth, config);
+      if (whose !== null)
+        await piMessages(req, res, backends, who, ledger, policy, whose, {
+          keepAliveMs: k.keepAliveMs,
+          body: text,
+        });
+    } else await pass(text);
   } else if (path === "/v1/chat/completions" && req.method === "POST") {
-    const whose = await streamSubject(req, res, who, auth, config);
-    if (whose !== null)
-      await chatCompletions(req, res, backends, who, ledger, policy, whose, { keepAliveMs: k.keepAliveMs });
+    // a model no backend answers natively goes through pi-ai, as before record 47
+    await pass(await readBody(req, PASS_LIMIT), async (text) => {
+      const whose = await streamSubject(req, res, who, auth, config);
+      if (whose !== null)
+        await chatCompletions(req, res, backends, who, ledger, policy, whose, {
+          keepAliveMs: k.keepAliveMs,
+          body: text,
+        });
+    });
+  } else if (Object.hasOwn(DOORS, path) && req.method === "POST") {
+    await pass(await readBody(req, PASS_LIMIT));
+  } else if (path === "/v1/clients" && req.method === "GET") {
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the client keys need kvasir:work");
+    const usage = clients.usage(config.clients.ledgerDays);
+    json(res, 200, {
+      clients: clients.list().map((c) => ({ ...clientOut(c), usage: usage.get(c.id) ?? null })),
+      usage_days: config.clients.ledgerDays,
+    });
+  } else if (path === "/v1/clients" && req.method === "POST") {
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "a client key needs kvasir:work");
+    const body = JSON.parse((await readBody(req)) || "{}");
+    try {
+      const made = clients.add(String(body.name ?? ""), {
+        models: Array.isArray(body.models) ? body.models.filter((m: unknown) => typeof m === "string") : null,
+        swap: body.swap !== false,
+        by: who.subject,
+      });
+      json(res, 201, { ...clientOut(made), key: made.secret, shown: "once" });
+    } catch (e) {
+      if (!(e instanceof ClientRefused)) throw e;
+      json(res, 400, { error: { code: "bad_request", message: e.message } });
+    }
+  } else if (path.startsWith("/v1/clients/") && req.method === "DELETE") {
+    if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "revoking a client key needs kvasir:work");
+    const id = decodeURIComponent(path.slice("/v1/clients/".length));
+    if (clients.revoke(id)) {
+      res.writeHead(204);
+      res.end();
+    } else
+      json(res, 404, { error: { code: "no_such_key", message: `no client key ${id} that is not revoked` } });
   } else if (path === "/v1/keys" && req.method === "GET") {
     if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "the keys need kvasir:work");
     json(res, 200, { keys: keys.list() });
@@ -595,11 +728,50 @@ async function route(
     // record 23: local models downloaded by Kvasir; record 24: a GGUF download started on the install's runtime
     if (!holds(who, "kvasir:work")) return noGrant(res, WORK, "local models need kvasir:work");
     await localDoor(req, res, path, who, local);
+  } else if (path.startsWith("/v1/models/") && req.method === "GET") {
+    // one model as `/v1/models` lists it, by id, served name or alias
+    const found = served.resolve(decodeURIComponent(path.slice("/v1/models/".length)));
+    if (!found || !mayUse(who, found, served))
+      json(res, 404, {
+        error: { message: `no model ${path.slice("/v1/models/".length)}`, type: "invalid_request_error" },
+      });
+    else json(res, 200, modelCard(found, served.default()?.model.id));
   } else {
     json(res, 404, {
       error: { code: "no_such_door", message: `${req.method} ${path} is not a door Kvasir has` },
     });
   }
+}
+
+/** Whether a body on the old `/v1/messages` is pi-messages: pi's `context` and no Anthropic `messages`. */
+export function piShaped(text: string): boolean {
+  try {
+    const b = JSON.parse(text);
+    return (
+      !!b &&
+      typeof b === "object" &&
+      typeof b.context === "object" &&
+      b.context !== null &&
+      !Array.isArray(b.messages)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** A client key as a door shows it: never its secret or its hash. */
+function clientOut(c: import("./clients.js").ClientKey): Record<string, unknown> {
+  return {
+    id: c.id,
+    name: c.name,
+    models: c.models,
+    swap: c.swap,
+    origin: c.origin,
+    created_at: c.createdAt,
+    created_by: c.createdBy,
+    revoked_at: c.revokedAt,
+    last_used_at: c.lastUsedAt,
+  };
 }
 
 function lifecycleError(res: ServerResponse, e: unknown): void {
@@ -720,6 +892,9 @@ function subscriberOf(who: Principal, config: Config): { subject: string; for: "
   return who.kind === "person" ? { subject: who.subject, for: "person" } : null;
 }
 
+/** The largest body a pass-through door reads, images and all: modelgate's 64 MiB. */
+const PASS_LIMIT = 64 << 20;
+
 /** The grant of the doors that change Kvasir. */
 const WORK: Grant[] = ["kvasir:work"];
 /** What a subscription of one's own needs to be signed in, chosen, and to answer a stream (record 25). */
@@ -774,12 +949,20 @@ export async function ready(
   }
 }
 
-export function listen(k: Kvasir, bind: string): Promise<string> {
+export function listen(k: Kvasir, bind: string, server: Server = k.server): Promise<string> {
   const [host, port] = bind.includes(":")
     ? [bind.slice(0, bind.lastIndexOf(":")), Number(bind.slice(bind.lastIndexOf(":") + 1))]
     : ["127.0.0.1", Number(bind)];
   return new Promise((resolve, reject) => {
-    k.server.once("error", reject);
-    k.server.listen(port, host, () => resolve(k.address()));
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      const a = server.address();
+      resolve(typeof a === "object" && a ? `http://${a.address}:${a.port}` : "");
+    });
   });
+}
+
+/** The public doors alone, on their own listener (record 47): the one the edge routes to. */
+export function listenPublic(k: Kvasir, bind: string): Promise<string> {
+  return listen(k, bind, k.publicServer);
 }

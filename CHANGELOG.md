@@ -4,6 +4,18 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Doors that pass a request through as the client sent it (record 47): `POST /v1/chat/completions`, `/v1/completions`, `/v1/messages` (Anthropic's), `/v1/messages/count_tokens` and `/v1/responses`, for a backend that speaks them natively, as SGLang does. A backend says which it speaks with `passThrough` (`chat-completions`, `completions`, `messages`, `responses`; `kvasir models add --pass-through ...`). Kvasir changes two things in a request: the model's name, to the one its backend serves it by, and on Anthropic's messages a request without `thinking` goes on as thinking disabled, as Anthropic's own API behaves (`anthropicThinking: "as-sent"` on a backend leaves it to the model). Tools, images, stop sequences and every other field go as they came, and the answer comes back event for event. A stream that waits for a slot or a swap gets its headers at once and a comment each second, and one that says nothing gets `: ping` as the other doors do. A request whose longest answer, or a low estimate of its input beside it, cannot fit the model's context is refused with 400 `context_length_exceeded` before a backend is asked. Each request is one ledger row with the usage the answer carried, in counts; for that, a streamed OpenAI request with no `stream_options` is sent with `include_usage`, and the usage-only event is taken out of the stream again.
+- `GET /v1/models` in modelgate's shape: each model with `aliases`, `default`, `status` (loaded or cold), `context_length`, `max_output_tokens` and its specs, and a `server` block where a card gives one; `GET /v1/models/{id}` answers one model by id, served name or alias. The models come from `Served` (`src/served.ts`), which the held backends fill and a card registers with.
+- Client keys (record 47), for clients outside NILS: a name, the models the key may use (every model where it names none), whether it may load a cold model in place of the loaded one, when it was made, revoked and last used, and only the sha256 of its secret. `kvasir keys add --name N [--models A,B] [--no-swap]` prints a new key once; `kvasir keys import --modelgate FILE` reads modelgate's keys file (`name sha256hex` per line), so the keys people hold keep working; `kvasir keys list` shows every key with its use over the ledger's days; `kvasir keys revoke --id ID | --name N` refuses the key on its next request. The same for `kvasir:work` at `GET` and `POST /v1/clients` and `DELETE /v1/clients/{id}`. A key is taken as a bearer or in `x-api-key`. The ledger names the client key of each row, and keeps a client key's rows for `clients.ledgerDays` days, 90 by default.
+- The doors meant for the public route, `public.doors` in kvasir.json (the pass-through doors, `/v1/models` and `/health` by default). A client key opens these and no other. `public.bind` puts them on a listener of their own, which answers nothing else, for the edge to route to.
+
+### Changed
+
+- The pi-messages door is `POST /v1/pi/messages`, and `GET /v1/config` gives `baseUrl` as `{origin}/v1/pi`, so pi's client, which streams to `{baseUrl}/messages`, follows it. For this release `POST /v1/messages` still takes a pi-messages body: a body with pi's `context` and no `messages` array is pi-messages, answered with `deprecation: true` and a `link` to the new door; anything else is Anthropic's. The next release answers Anthropic's only there.
+- `POST /v1/chat/completions` for a model whose backend does not speak it natively goes through pi-ai as before.
+
 ## [1.0.0-alpha.7] - 2026-09-15
 
 ### Changed

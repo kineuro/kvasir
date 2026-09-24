@@ -21,6 +21,8 @@ export interface Row {
   totalMs: number | null;
   outcome: "completed" | "refused" | "error" | "aborted" | "capped";
   refusal?: { layer: string; fact: string };
+  /** The client key the stream was spent under (record 47), where a client key called. */
+  clientKey?: string | null;
 }
 
 const TTFT_BUCKETS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32];
@@ -35,8 +37,8 @@ export class Ledger {
   record(r: Row): void {
     this.store.db
       .prepare(
-        `INSERT INTO ledger (at, subject, purpose, model, backend, grant_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, gpu_seconds, money, ttft_ms, total_ms, outcome, refusal_layer, refusal_fact)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO ledger (at, subject, purpose, model, backend, grant_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, gpu_seconds, money, ttft_ms, total_ms, outcome, refusal_layer, refusal_fact, client_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         Date.now(),
@@ -57,6 +59,7 @@ export class Ledger {
         r.outcome,
         r.refusal?.layer ?? null,
         r.refusal?.fact ?? null,
+        r.clientKey ?? null,
       );
     const key = `${r.backend ?? "none"}|${r.model ?? "none"}|${r.outcome}`;
     this.counters.set(key, (this.counters.get(key) ?? 0) + 1);
@@ -71,6 +74,19 @@ export class Ledger {
       this.ttftSum += s;
       this.ttftCount += 1;
     }
+  }
+
+  /**
+   * The rows of client keys older than `days` days let go (record 47, R8: the
+   * ledger keeps 90 days of counts per key). The rows of NILS's own streams
+   * are kept as before.
+   */
+  prune(days: number): number {
+    return Number(
+      this.store.db
+        .prepare("DELETE FROM ledger WHERE client_key IS NOT NULL AND at < ?")
+        .run(Date.now() - days * 86_400_000).changes,
+    );
   }
 
   /** The rows a caller may read: an admin every row, anyone else their own. */

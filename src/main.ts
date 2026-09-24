@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // `kvasir --config kvasir.json`: serve the models this database holds, each
 // local one warmed until its first token. And the command line, on the same
-// database with no server bound: the models, the keys, admission and the
-// lifecycle.
+// database with no server bound: the models, the keys (NILS's apps' and the
+// clients'), admission and the lifecycle.
 
 import { readFileSync } from "node:fs";
 import { read } from "./config.js";
 import { described, HeldRefused, RUNTIME_BACKEND, type Tried, tryBackend } from "./held.js";
 import { readable } from "./local.js";
-import { build, listen, ready, VERSION } from "./server.js";
+import { build, listen, listenPublic, ready, VERSION } from "./server.js";
 import { SYSTEM } from "./subscriptions.js";
 import { probeRuntime } from "./suite.js";
 
@@ -51,7 +51,7 @@ function sayTried(tried: Tried): void {
 // what was added and letting go what was removed.
 if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?? "")) {
   const usage =
-    "kvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON]";
+    "kvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON] [--pass-through chat-completions,completions,messages,responses] [--anthropic-thinking disabled|as-sent]";
   const k = build(config);
   try {
     if (args[1] === "list") {
@@ -88,6 +88,8 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
         key: keyFile ? readFileSync(keyFile, "utf8").trim() : undefined,
         concurrency: flag("--concurrency"),
         inlineReasoning: flag("--inline-reasoning"),
+        passThrough: flag("--pass-through"),
+        anthropicThinking: flag("--anthropic-thinking"),
         compat: flag("--compat") ? JSON.parse(flag("--compat") as string) : undefined,
         defaults: flag("--temperature") ? { temperature: flag("--temperature") } : undefined,
         models: models.map((id) => ({
@@ -389,26 +391,86 @@ if (args[0] === "keys" && args[1] === "mint") {
   }
 }
 
-// `kvasir keys list | revoke --id ID`: the minted keys, never their secrets.
-if (args[0] === "keys" && (args[1] === "list" || args[1] === "revoke")) {
+// `kvasir keys add | import | list | revoke`: the client keys of the doors that
+// pass a request through (record 47), beside the minted keys of NILS's apps.
+// `add` prints the new key once, on stdout, and nothing else there; `import`
+// reads modelgate's keys file, one `name sha256hex` per line, so the keys
+// people hold today keep working; `list` shows every key, never a secret or a
+// hash, with each client key's use over the ledger's days; `revoke` takes a
+// key's id, or a client key's name where one live key carries it.
+if (args[0] === "keys" && ["add", "import", "list", "revoke"].includes(args[1] ?? "")) {
   const k = build(config);
-  if (args[1] === "list") {
-    for (const key of k.keys.list()) {
-      console.log(
-        `${key.id}  ${key.principal}  ${key.purposes.join(",") || "no purpose"}  ${key.maxClass}${key.expiresAt ? `  expires ${new Date(key.expiresAt).toISOString()}` : ""}`,
+  try {
+    if (args[1] === "add") {
+      const name = flag("--name");
+      if (!name) {
+        console.error("kvasir keys add --name NAME [--models ID,ID] [--no-swap]");
+        process.exit(2);
+      }
+      const models = (flag("--models") ?? "")
+        .split(",")
+        .map((m) => m.trim())
+        .filter(Boolean);
+      const made = k.clients.add(name, { models, swap: !args.includes("--no-swap"), by });
+      console.error(
+        `kvasir: made client key ${made.id} for ${made.name}, ${made.models ? `models ${made.models.join(", ")}` : "every model"}, ${made.swap ? "may load a cold model" : "never loads a cold model"}`,
       );
+      console.log(made.secret);
+    } else if (args[1] === "import") {
+      const file = flag("--modelgate") ?? flag("--file");
+      if (!file) {
+        console.error("kvasir keys import --modelgate FILE");
+        process.exit(2);
+      }
+      const r = k.clients.importModelgate(file, by);
+      console.log(
+        `imported ${r.added} key(s) from ${file}; ${r.present} already held, ${r.skipped} line(s) not a key`,
+      );
+    } else if (args[1] === "list") {
+      for (const key of k.keys.list()) {
+        console.log(
+          `${key.id}  ${key.principal}  ${key.purposes.join(",") || "no purpose"}  ${key.maxClass}${key.expiresAt ? `  expires ${new Date(key.expiresAt).toISOString()}` : ""}`,
+        );
+      }
+      const days = k.config.clients.ledgerDays;
+      const usage = k.clients.usage(days);
+      for (const c of k.clients.list()) {
+        const u = usage.get(c.id);
+        console.log(
+          `${c.id}  ${c.name}  client (${c.origin})  ${c.models ? c.models.join(",") : "every model"}  ${c.swap ? "swap" : "no swap"}  made ${new Date(c.createdAt).toISOString()}${c.revokedAt ? `  REVOKED ${new Date(c.revokedAt).toISOString()}` : ""}  ${c.lastUsedAt ? `last used ${new Date(c.lastUsedAt).toISOString()}` : "never used"}  ${days} d: ${u?.streams ?? 0} stream(s), ${u?.input ?? 0} in, ${u?.output ?? 0} out`,
+        );
+      }
+    } else {
+      const id = flag("--id");
+      const name = flag("--name");
+      if (!id && !name) {
+        console.error("kvasir keys revoke --id ID | --name NAME");
+        process.exit(2);
+      }
+      if (id) {
+        if (id.startsWith("c_") ? k.clients.revoke(id) : k.keys.revoke(id)) console.log(`revoked ${id}`);
+        else {
+          console.error(`kvasir: no key ${id} that is not revoked`);
+          process.exitCode = 1;
+        }
+      } else {
+        const live = k.clients.named(name as string);
+        if (live.length !== 1) {
+          console.error(
+            live.length === 0
+              ? `kvasir: no live client key is named ${name}`
+              : `kvasir: ${live.length} live client keys are named ${name}: revoke one by --id (${live.map((c) => c.id).join(", ")})`,
+          );
+          process.exitCode = 1;
+        } else {
+          k.clients.revoke(live[0].id);
+          console.log(`revoked ${live[0].id} (${name})`);
+        }
+      }
     }
-  } else {
-    const id = flag("--id");
-    if (!id) {
-      console.error("kvasir keys revoke --id ID");
-      process.exit(2);
-    }
-    if (k.keys.revoke(id)) console.log(`revoked ${id}`);
-    else {
-      console.error(`kvasir: no key ${id}`);
-      process.exitCode = 1;
-    }
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
   }
   await k.close();
   process.exit(process.exitCode ?? 0);
@@ -545,6 +607,9 @@ k.held.onAdded = (backend) => void ready(k, backend);
 // the admitted sets from the records, against the runtime each backend reports now (§8.6)
 await k.admissions.load(k.backends, (b) => probeRuntime(b));
 const address = await listen(k, config.bind);
+// the doors meant for the public route on a listener of their own, where kvasir.json names one (record 47)
+if (config.public.bind)
+  console.log(`kvasir: the public doors on ${await listenPublic(k, config.public.bind)} as well`);
 // the models an admin added; Kvasir's own ChatGPT is not one of them
 const added = k.backends.list.filter((b) => !b.config.builtin);
 const held = added.length;
