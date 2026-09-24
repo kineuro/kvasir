@@ -451,8 +451,12 @@ export class Card {
         const left = deadline - Date.now();
         if (left <= 0)
           throw this.refused(`${id} was not loaded within ${Math.round(this.times.queueTimeoutMs / 1000)} s`);
-        await this.changed(Math.min(left, 1_000));
-        if (Date.now() - beat >= 1_000) {
+        // wait until the next beat is due, not a whole second from the last wake: a wake just before a beat
+        // (a drain ending, a swap starting) would push it to almost two seconds; the timer may also fire a
+        // millisecond early by the wall clock, so a beat due within a few milliseconds counts as due
+        const due = beat + 1_000;
+        await this.changed(Math.min(left, due - Date.now()));
+        if (Date.now() >= due - 5) {
           heartbeat?.();
           beat = Date.now();
         }
