@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // `kvasir --config kvasir.json`: serve the models this database holds, each
 // local one warmed until its first token. And the command line, on the same
-// database with no server bound: the models, the keys, admission and the
-// lifecycle.
+// database with no server bound: the models, the keys (NILS's apps' and the
+// clients'), admission and the lifecycle.
 
 import { readFileSync } from "node:fs";
 import { read } from "./config.js";
 import { described, HeldRefused, RUNTIME_BACKEND, type Tried, tryBackend } from "./held.js";
 import { readable } from "./local.js";
-import { build, listen, ready, VERSION } from "./server.js";
+import { build, listen, listenPublic, ready, VERSION } from "./server.js";
 import { SYSTEM } from "./subscriptions.js";
 import { probeRuntime } from "./suite.js";
 
@@ -45,13 +45,65 @@ function sayTried(tried: Tried): void {
   }
 }
 
+// `kvasir models add --server URL --key-file F [--model ID]...` (record 47): a model server's models listed
+// with their specs from its /v1/models, and the ones named admitted one by one on the server's one backend,
+// its key sealed under the backend. Without --model the list is shown and nothing is kept.
+if (args[0] === "models" && args[1] === "add" && flag("--server")) {
+  const k = build(config);
+  const keyFile = flag("--key-file");
+  const input = {
+    url: flag("--server"),
+    key: keyFile ? readFileSync(keyFile, "utf8").trim() : undefined,
+    id: flag("--id"),
+    locality: flag("--locality") ?? "local",
+    models: flags("--model"),
+  };
+  try {
+    const offer = await k.servers.offered(input);
+    if (offer.note) console.log(offer.note);
+    const loaded = offer.server?.loaded;
+    console.log(
+      `${offer.url} offers ${offer.models.length} model(s)${loaded ? `; ${loaded} is loaded` : ""}`,
+    );
+    for (const m of offer.models) {
+      const caps = [m.reasoning ? "reasoning" : "", m.tools ? "tools" : "", m.vision ? "vision" : ""]
+        .filter(Boolean)
+        .join(", ");
+      console.log(
+        `  ${m.id}${m.default ? " (default)" : ""}  ${m.status}  context ${m.context_length ?? "?"}  answer ${m.max_output_tokens ?? "?"}  ${m.max_concurrent_requests ?? "?"} at once${caps ? `  ${caps}` : ""}${m.aliases.length ? `  also ${m.aliases.join(", ")}` : ""}${m.held_by ? `  held by ${m.held_by}` : ""}`,
+      );
+    }
+    if (input.models.length === 0) {
+      console.log(
+        `nothing is added: name the models to admit with --model ID, such as kvasir models add --server ${offer.url}${keyFile ? ` --key-file ${keyFile}` : ""} --model ${offer.models.find((m) => m.default)?.id ?? offer.models[0]?.id ?? "ID"}`,
+      );
+    } else {
+      const done = await k.servers.admit(input, by, (line) => console.log(`  ${line}`));
+      for (const r of done.results)
+        console.log(
+          `${r.id}: ${!r.answered ? `did not answer (${r.error?.kind}): ${r.error?.message}` : r.admitted === null ? "held" : r.admitted ? "admitted" : "held, refused by admission"}`,
+        );
+      if (done.backend)
+        console.log(
+          `${done.backend.id} holds ${done.backend.models.join(", ")}; a Kvasir serving this database follows within seconds`,
+        );
+      if (done.results.some((r) => !r.answered || r.admitted === false)) process.exitCode = 1;
+    }
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
+  }
+  await k.close();
+  process.exit(process.exitCode ?? 0);
+}
+
 // `kvasir models list | test | add | remove` (record 23): the models this
 // database holds. A model is added only once it answered one short request;
 // a Kvasir serving the database follows within seconds, warming and admitting
 // what was added and letting go what was removed.
 if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?? "")) {
   const usage =
-    "kvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON]";
+    "kvasir models add --server URL [--key-file FILE] [--model ID]... [--id NAME] [--locality local|remote]\nkvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON] [--pass-through chat-completions,completions,messages,responses] [--anthropic-thinking disabled|as-sent]";
   const k = build(config);
   try {
     if (args[1] === "list") {
@@ -88,6 +140,8 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
         key: keyFile ? readFileSync(keyFile, "utf8").trim() : undefined,
         concurrency: flag("--concurrency"),
         inlineReasoning: flag("--inline-reasoning"),
+        passThrough: flag("--pass-through"),
+        anthropicThinking: flag("--anthropic-thinking"),
         compat: flag("--compat") ? JSON.parse(flag("--compat") as string) : undefined,
         defaults: flag("--temperature") ? { temperature: flag("--temperature") } : undefined,
         models: models.map((id) => ({
@@ -389,26 +443,86 @@ if (args[0] === "keys" && args[1] === "mint") {
   }
 }
 
-// `kvasir keys list | revoke --id ID`: the minted keys, never their secrets.
-if (args[0] === "keys" && (args[1] === "list" || args[1] === "revoke")) {
+// `kvasir keys add | import | list | revoke`: the client keys of the doors that
+// pass a request through (record 47), beside the minted keys of NILS's apps.
+// `add` prints the new key once, on stdout, and nothing else there; `import`
+// reads modelgate's keys file, one `name sha256hex` per line, so the keys
+// people hold today keep working; `list` shows every key, never a secret or a
+// hash, with each client key's use over the ledger's days; `revoke` takes a
+// key's id, or a client key's name where one live key carries it.
+if (args[0] === "keys" && ["add", "import", "list", "revoke"].includes(args[1] ?? "")) {
   const k = build(config);
-  if (args[1] === "list") {
-    for (const key of k.keys.list()) {
-      console.log(
-        `${key.id}  ${key.principal}  ${key.purposes.join(",") || "no purpose"}  ${key.maxClass}${key.expiresAt ? `  expires ${new Date(key.expiresAt).toISOString()}` : ""}`,
+  try {
+    if (args[1] === "add") {
+      const name = flag("--name");
+      if (!name) {
+        console.error("kvasir keys add --name NAME [--models ID,ID] [--no-swap]");
+        process.exit(2);
+      }
+      const models = (flag("--models") ?? "")
+        .split(",")
+        .map((m) => m.trim())
+        .filter(Boolean);
+      const made = k.clients.add(name, { models, swap: !args.includes("--no-swap"), by });
+      console.error(
+        `kvasir: made client key ${made.id} for ${made.name}, ${made.models ? `models ${made.models.join(", ")}` : "every model"}, ${made.swap ? "may load a cold model" : "never loads a cold model"}`,
       );
+      console.log(made.secret);
+    } else if (args[1] === "import") {
+      const file = flag("--modelgate") ?? flag("--file");
+      if (!file) {
+        console.error("kvasir keys import --modelgate FILE");
+        process.exit(2);
+      }
+      const r = k.clients.importModelgate(file, by);
+      console.log(
+        `imported ${r.added} key(s) from ${file}; ${r.present} already held, ${r.skipped} line(s) not a key`,
+      );
+    } else if (args[1] === "list") {
+      for (const key of k.keys.list()) {
+        console.log(
+          `${key.id}  ${key.principal}  ${key.purposes.join(",") || "no purpose"}  ${key.maxClass}${key.expiresAt ? `  expires ${new Date(key.expiresAt).toISOString()}` : ""}`,
+        );
+      }
+      const days = k.config.clients.ledgerDays;
+      const usage = k.clients.usage(days);
+      for (const c of k.clients.list()) {
+        const u = usage.get(c.id);
+        console.log(
+          `${c.id}  ${c.name}  client (${c.origin})  ${c.models ? c.models.join(",") : "every model"}  ${c.swap ? "swap" : "no swap"}  made ${new Date(c.createdAt).toISOString()}${c.revokedAt ? `  REVOKED ${new Date(c.revokedAt).toISOString()}` : ""}  ${c.lastUsedAt ? `last used ${new Date(c.lastUsedAt).toISOString()}` : "never used"}  ${days} d: ${u?.streams ?? 0} stream(s), ${u?.input ?? 0} in, ${u?.output ?? 0} out`,
+        );
+      }
+    } else {
+      const id = flag("--id");
+      const name = flag("--name");
+      if (!id && !name) {
+        console.error("kvasir keys revoke --id ID | --name NAME");
+        process.exit(2);
+      }
+      if (id) {
+        if (id.startsWith("c_") ? k.clients.revoke(id) : k.keys.revoke(id)) console.log(`revoked ${id}`);
+        else {
+          console.error(`kvasir: no key ${id} that is not revoked`);
+          process.exitCode = 1;
+        }
+      } else {
+        const live = k.clients.named(name as string);
+        if (live.length !== 1) {
+          console.error(
+            live.length === 0
+              ? `kvasir: no live client key is named ${name}`
+              : `kvasir: ${live.length} live client keys are named ${name}: revoke one by --id (${live.map((c) => c.id).join(", ")})`,
+          );
+          process.exitCode = 1;
+        } else {
+          k.clients.revoke(live[0].id);
+          console.log(`revoked ${live[0].id} (${name})`);
+        }
+      }
     }
-  } else {
-    const id = flag("--id");
-    if (!id) {
-      console.error("kvasir keys revoke --id ID");
-      process.exit(2);
-    }
-    if (k.keys.revoke(id)) console.log(`revoked ${id}`);
-    else {
-      console.error(`kvasir: no key ${id}`);
-      process.exitCode = 1;
-    }
+  } catch (e) {
+    console.error(`kvasir: ${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
   }
   await k.close();
   process.exit(process.exitCode ?? 0);
@@ -542,9 +656,14 @@ if (args[0] === "models" && args[1] === "lifecycle") {
 const k = build(config);
 // a backend added while this serves, from the desk or the command line, is admitted and warmed here
 k.held.onAdded = (backend) => void ready(k, backend);
+// a card's model, once loaded, is admitted where it has no record and the gate holds (record 47)
+k.cards.onLoaded = (backend) => void ready(k, backend);
 // the admitted sets from the records, against the runtime each backend reports now (§8.6)
 await k.admissions.load(k.backends, (b) => probeRuntime(b));
 const address = await listen(k, config.bind);
+// the doors meant for the public route on a listener of their own, where kvasir.json names one (record 47)
+if (config.public.bind)
+  console.log(`kvasir: the public doors on ${await listenPublic(k, config.public.bind)} as well`);
 // the models an admin added; Kvasir's own ChatGPT is not one of them
 const added = k.backends.list.filter((b) => !b.config.builtin);
 const held = added.length;
@@ -558,13 +677,27 @@ for (const b of added) {
     b.config.locality === "remote"
       ? ""
       : `, admitted: ${[...b.admitted].join(", ") || `none (kvasir admission run --backend ${b.config.id})`}`;
-  const again = b.config.warmup === false ? "" : ", trying again";
-  console.log(
-    `  ${b.config.id}: ${b.health.warming ? `still warming (${b.health.lastError ?? "no first token yet"})${again}` : "warm"}${admitted}`,
-  );
+  const on = k.cards.of(b);
+  // a backend Kvasir does not warm is cold until a request reaches it (#8); a card's model is its card's
+  const state = on
+    ? `on ${on.card.id}`
+    : b.health.warming
+      ? `still warming (${b.health.lastError ?? "no first token yet"}), trying again`
+      : b.health.firstTokenAt || b.config.locality === "remote"
+        ? "warm"
+        : "not warmed";
+  console.log(`  ${b.config.id}: ${state}${admitted}`);
   if (b.health.warming) void b.keepWarm(undefined, (line) => console.log(`  ${line}`));
 }
 k.held.watch();
+// the cards adopt the model already running, or load their default, and swap on request (record 47)
+for (const card of k.cards.list)
+  console.log(
+    `  ${card.id}: ${card.config.driver.kind}, ${[...card.members.keys()].join(", ")}; default ${card.default}${card.config.manage ? "" : "; watched, never started or stopped"}`,
+  );
+void k.cards.start((line) => console.log(`  ${line}`));
+// what each model server held as a backend says of its models, loaded or cold, every 30 seconds
+k.servers.watch();
 // local model downloads left queued or downloading when Kvasir last closed carry on, one model at a time (record 23)
 k.local.say = (line) => console.log(`  ${line}`);
 const carrying = k.local.start();

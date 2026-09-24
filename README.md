@@ -43,6 +43,18 @@ node dist/main.js --config kvasir.json
 
 Callers hold grants, as everywhere in NILS: a trusted token's `grants` claim, or what `auth.roles` binds a group to and a token in `auth.tokens` lists, each a grant or a ladder step that stands for its set. `kvasir:work` opens the doors that change Kvasir, and a person's own ChatGPT subscription needs `assistant:use` and `kvasir:see`. A trust entry with `keepSubject: true`, the desk's own as setup writes it, takes a subject that already holds `@` as the principal; any other entry qualifies it by the issuer's host.
 
+## Serving clients outside NILS
+
+Kvasir can also be the group's model server: one address and one key per client for OpenAI- and Anthropic-shaped clients such as Droid or a script. A backend added with `--pass-through chat-completions,completions,messages,responses` answers those doors as the client sent them, with only the model's name changed. `GET /v1/models` lists each model with its specs.
+
+```sh
+node dist/main.js keys add --name droid --config kvasir.json
+node dist/main.js keys import --modelgate /etc/modelgate/keys --config kvasir.json
+node dist/main.js keys list --config kvasir.json
+```
+
+A client key opens only the doors in `public.doors`; `public.bind` serves those alone on a listener of their own. NILS's assistant streams through `/v1/pi/messages`.
+
 ## Local models
 
 Kvasir downloads a model from the Hugging Face Hub into a location an admin can change, resumes a download where it stopped, checks each file against the hub's sha256, and lists every model with its size, its state and the commands that serve it. It runs no model: start your model server on the download, then add that server as any other.
@@ -50,6 +62,17 @@ Kvasir downloads a model from the Hugging Face Hub into a location an admin can 
 ```sh
 node dist/main.js local download --repo OWNER/NAME --include "*Q4_K_M.gguf" --config kvasir.json
 node dist/main.js local list --config kvasir.json
+```
+
+## A card, and a model server as a backend
+
+A Kvasir with `cards` in its configuration serves a group of models that share one GPU, one loaded at a time, as `kvasir.card.example.json` shows. Asking for the model that is not loaded swaps it in: Kvasir lets the running requests finish, stops the loaded model, starts the other and waits for its health, and goes back to the default after a while without use. The models run as SGLang containers Kvasir starts and stops by name (`"driver": "docker"`), or as presets of a llama.cpp router (`"driver": "llama-router"`). `GET /health` says which model is loaded. A card's models answer the pass-through doors above; a request for the cold one waits out the swap with its headers sent early, and a key made with `--no-swap` is refused it instead (409).
+
+Another Kvasir uses such a server as one backend, by its address and key. It lists the models with their specs, and admits the ones you name one by one:
+
+```sh
+node dist/main.js models add --server https://models.example.org/v1 --key-file server.key --config kvasir.json
+node dist/main.js models add --server https://models.example.org/v1 --key-file server.key --model qwen38-27b --config kvasir.json
 ```
 
 ## License

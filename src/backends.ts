@@ -14,8 +14,13 @@ import type { BackendConfig, ModelEntry } from "./config.js";
 import { splitInline } from "./inline.js";
 
 export interface Health {
-  /** No first token since start. */
+  /**
+   * No first token since start, on a backend Kvasir warms. A backend it does not warm (`warmup: false`) is
+   * never warming, and a card's model warms only while the card loads it at start (kineuro/kvasir#8).
+   */
   warming: boolean;
+  /** A card's model (record 47): loaded, being loaded, or cold, so asking it loads it. Absent elsewhere. */
+  status?: "loaded" | "loading" | "cold";
   firstTokenAt: number | null;
   lastError: string | null;
   /** Streams running now, of the concurrency admitted. */
@@ -43,8 +48,9 @@ export class Backend {
 
   constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000) {
     this.config = config;
-    // the warm-up rule (§8.5) is a local runtime's; a remote provider is not warmed by us
-    const warming = config.locality === "local";
+    // the warm-up rule (§8.5) is a local runtime's; a remote provider is not warmed by us, and a backend
+    // nobody asks to warm is not warming: it would hold the desk on its warming page for ever (#8)
+    const warming = config.locality === "local" && config.warmup !== false;
     this.health = {
       warming,
       firstTokenAt: null,
@@ -124,7 +130,7 @@ export class Backend {
       const mode = this.config.inlineReasoning ?? "markers";
       for await (const ev of mode === "off" ? events : splitInline(events, mode)) {
         if (
-          this.health.warming &&
+          (this.health.warming || this.health.firstTokenAt === null) &&
           (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta")
         ) {
           this.health.warming = false;
@@ -251,10 +257,14 @@ export class Backends {
     return !this.gate || backend.config.locality === "remote" || backend.admitted.has(entry.id);
   }
 
-  /** The backend and entry that serve a model id, or nothing. */
+  /** The backend and entry that serve a model id, or one of its aliases (record 47), or nothing. */
   find(modelId: string): { backend: Backend; entry: ModelEntry } | undefined {
     for (const backend of this.list) {
       const entry = backend.config.models.find((m) => m.id === modelId);
+      if (entry) return { backend, entry };
+    }
+    for (const backend of this.list) {
+      const entry = backend.config.models.find((m) => m.aliases?.includes(modelId));
       if (entry) return { backend, entry };
     }
     return undefined;

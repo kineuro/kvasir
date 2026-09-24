@@ -17,6 +17,12 @@ export class RefusedAdmission extends Error {
 
 export class Admission {
   running = 0;
+  /**
+   * A wait before a slot, where the model must first be loaded (record 47): a card's model that is cold
+   * waits here for the swap, up to the card's own queue timeout rather than the wait cap, with the same
+   * heartbeat; what it returns is called when the stream ends.
+   */
+  ahead: ((heartbeat?: () => void, signal?: AbortSignal) => Promise<() => void>) | null = null;
   private readonly waiting: (() => void)[] = [];
   constructor(
     readonly concurrency: number,
@@ -28,8 +34,26 @@ export class Admission {
     return this.waiting.length;
   }
 
-  /** A slot, waited for while `heartbeat` is called every second; refused when the queue is full or the wait cap passes. */
+  /**
+   * A slot, waited for while `heartbeat` is called every second; refused when the queue is full or the wait
+   * cap passes. Where the model must first be loaded, that wait comes before, under its own limit.
+   */
   async acquire(heartbeat?: () => void, signal?: AbortSignal): Promise<() => void> {
+    if (!this.ahead) return this.slot(heartbeat, signal);
+    const leave = await this.ahead(heartbeat, signal);
+    try {
+      const release = await this.slot(heartbeat, signal);
+      return () => {
+        release();
+        leave();
+      };
+    } catch (e) {
+      leave();
+      throw e;
+    }
+  }
+
+  private async slot(heartbeat?: () => void, signal?: AbortSignal): Promise<() => void> {
     if (this.running < this.concurrency) {
       this.running += 1;
       return () => this.release();

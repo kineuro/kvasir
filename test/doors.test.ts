@@ -238,7 +238,8 @@ describe("the door", () => {
         key: "the-runtime-key",
         locality: "local",
         concurrency: 8,
-        warmup: false,
+        // a backend Kvasir warms is warming until its first token; one it does not warm never is (#8)
+        warmup: true,
         models: [
           {
             id: "qwen38-27b",
@@ -258,7 +259,7 @@ describe("the door", () => {
     const config = await (
       await fetch(`${url}/v1/config`, { headers: { authorization: "Bearer a-kvasir-token" } })
     ).json();
-    expect(config.baseUrl).toBe("http://kvasir.test/v1");
+    expect(config.baseUrl).toBe("http://kvasir.test/v1/pi");
     expect(config.models[0].id).toBe("qwen38-27b");
     expect(config.health.warming).toBe(true);
     // a stream, as pi's own client sends it: the model, the context, the options, nothing else

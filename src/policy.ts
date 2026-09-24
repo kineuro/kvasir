@@ -32,7 +32,8 @@ export const POLICY_SCHEMA = `CREATE TABLE IF NOT EXISTS policy (
      acknowledged_at INTEGER,
      acknowledgement TEXT,
      set_by TEXT NOT NULL,
-     set_at INTEGER NOT NULL
+     set_at INTEGER NOT NULL,
+     model TEXT
    )`;
 
 export interface PolicyRow {
@@ -43,6 +44,8 @@ export interface PolicyRow {
   acknowledgement: string | null;
   setBy: string;
   setAt: number;
+  /** The model of the backend the purpose goes to (record 47), where the backend holds several; its first, promoted or subscribed one otherwise. */
+  model: string | null;
 }
 
 export interface Refusal {
@@ -109,6 +112,8 @@ export class Policy {
     private readonly backends: Backends,
   ) {
     store.db.exec(POLICY_SCHEMA);
+    // a table kept from before a station named a model (record 47)
+    if (!store.columns("policy").includes("model")) store.db.exec("ALTER TABLE policy ADD COLUMN model TEXT");
     this.purposes = new Map(purposes.map((p) => [p.id, p]));
   }
 
@@ -123,6 +128,7 @@ export class Policy {
       acknowledgement: r.acknowledgement == null ? null : String(r.acknowledgement),
       setBy: String(r.set_by),
       setAt: Number(r.set_at),
+      model: r.model == null ? null : String(r.model),
     }));
   }
 
@@ -133,6 +139,15 @@ export class Policy {
   /** The rows that mapped a purpose to a backend now let go: those purposes go to their default again. */
   forget(backendId: string): number {
     return Number(this.store.db.prepare("DELETE FROM policy WHERE backend = ?").run(backendId).changes);
+  }
+
+  /** The rows that named a model a backend no longer holds: those purposes keep the backend and go to its first model. */
+  forgetModel(backendId: string, modelId: string): number {
+    return Number(
+      this.store.db
+        .prepare("UPDATE policy SET model = NULL WHERE backend = ? AND model = ?")
+        .run(backendId, modelId).changes,
+    );
   }
 
   /** The table as the desk's models page reads it: every purpose with its backend, default or set, and what opening it would need. */
@@ -147,6 +162,7 @@ export class Policy {
         content: p.content,
         kind: p.kind,
         backend,
+        model: r?.model ?? null,
         locality: backend ? this.backends.list.find((b) => b.config.id === backend)?.config.locality : null,
         default: r === undefined,
         acknowledged: r?.acknowledgedBy
@@ -182,12 +198,24 @@ export class Policy {
    * purpose needs the acknowledgement sentence; an `identifiers` purpose
    * never goes remote.
    */
-  set(purpose: string, backendId: string, by: string, acknowledgement: string | null): PolicyRow {
+  set(
+    purpose: string,
+    backendId: string,
+    by: string,
+    acknowledgement: string | null,
+    /** The backend's model the purpose goes to (record 47): a station maps to a backend and a model. */
+    modelId: string | null = null,
+  ): PolicyRow {
     const p = this.purposes.get(purpose);
     if (!p)
       throw new Refused(404, [{ layer: "deployment", fact: `no purpose named ${purpose} is registered` }]);
     const b = this.backends.list.find((x) => x.config.id === backendId);
     if (!b) throw new Refused(404, [{ layer: "deployment", fact: `no backend named ${backendId}` }]);
+    const model = modelId
+      ? b.config.models.find((m) => m.id === modelId || m.aliases?.includes(modelId))
+      : undefined;
+    if (modelId && !model)
+      throw new Refused(404, [{ layer: "deployment", fact: `${backendId} holds no model named ${modelId}` }]);
     if (b.config.locality === "remote") {
       if (p.content === "identifiers") {
         throw new Refused(403, [
@@ -211,10 +239,10 @@ export class Policy {
     const ack = b.config.locality === "remote" && p.content === "rows" ? acknowledgement : null;
     this.store.db
       .prepare(
-        `INSERT INTO policy (purpose, backend, acknowledged_by, acknowledged_at, acknowledgement, set_by, set_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(purpose) DO UPDATE SET backend = excluded.backend, acknowledged_by = excluded.acknowledged_by, acknowledged_at = excluded.acknowledged_at, acknowledgement = excluded.acknowledgement, set_by = excluded.set_by, set_at = excluded.set_at`,
+        `INSERT INTO policy (purpose, backend, acknowledged_by, acknowledged_at, acknowledgement, set_by, set_at, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(purpose) DO UPDATE SET backend = excluded.backend, acknowledged_by = excluded.acknowledged_by, acknowledged_at = excluded.acknowledged_at, acknowledgement = excluded.acknowledgement, set_by = excluded.set_by, set_at = excluded.set_at, model = excluded.model`,
       )
-      .run(purpose, backendId, ack ? by : null, ack ? now : null, ack, by, now);
+      .run(purpose, backendId, ack ? by : null, ack ? now : null, ack, by, now, model?.id ?? null);
     return this.row(purpose) as PolicyRow;
   }
 
@@ -303,19 +331,34 @@ export class Policy {
     // a pin: recorded, never above the policy; a bumped request runs local
     // and the pin, if it named a remote model, is set aside and said so
     const lead = this.promoted(chosen.config.id);
+    // the model the table names for the purpose on that backend (record 47), where the table was followed
+    const mapped =
+      row?.model && !opts.bumped && row.backend === chosen.config.id
+        ? chosen.config.models.find((m) => m.id === row.model)
+        : undefined;
     let entry =
       (subscribed ? chosen.config.models.find((m) => m.id === subscribed) : undefined) ??
+      mapped ??
       (lead ? chosen.config.models.find((m) => m.id === lead) : undefined) ??
       chosen.config.models[0];
-    if (lead && entry?.id === lead) because.push(`${lead} is the promoted model on ${chosen.config.id}`);
+    if (mapped && entry?.id === mapped.id)
+      because.push(`the policy table names ${mapped.id} on ${chosen.config.id} for ${purposeId}`);
+    else if (lead && entry?.id === lead) because.push(`${lead} is the promoted model on ${chosen.config.id}`);
     if (opts.pin && opts.bumped && !chosen.config.models.some((m) => m.id === opts.pin)) {
       because.push(
         `the pinned model ${opts.pin} is not local, so the request runs on ${entry?.id ?? "the local model"} instead`,
       );
     } else if (opts.pin) {
-      const pinned = chosen.config.models.find((m) => m.id === opts.pin);
+      const pinned = chosen.config.models.find(
+        (m) => m.id === opts.pin || m.aliases?.includes(opts.pin ?? ""),
+      );
       const elsewhere = pinned ? undefined : this.backends.find(opts.pin);
-      if (pinned && !subscribed) {
+      if (pinned && !subscribed && mapped && pinned.id !== mapped.id) {
+        // a station maps to a backend and a model (record 47): the table's model, whatever the caller named
+        because.push(
+          `${opts.pin} was named by the caller, and the policy table sends ${purposeId} to ${mapped.id}, so it runs there`,
+        );
+      } else if (pinned && !subscribed) {
         entry = pinned;
         because.push(`pinned to ${opts.pin} by the caller, recorded`);
       } else if (!pinned && (row || subscribed)) {

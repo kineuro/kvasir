@@ -50,5 +50,21 @@
   ],
   "local": {
     "endpoint": "https://huggingface.co"
+  },
+  "public": {
+    "bind": null,
+    "doors": [
+      "GET /v1/models",
+      "GET /v1/models/*",
+      "POST /v1/chat/completions",
+      "POST /v1/completions",
+      "POST /v1/messages",
+      "POST /v1/messages/count_tokens",
+      "POST /v1/responses",
+      "GET /health"
+    ]
+  },
+  "clients": {
+    "ledgerDays": 90
   }
 }

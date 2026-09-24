@@ -1,0 +1,116 @@
+{
+  "bind": "127.0.0.1:30010",
+  "origin": "https://kvasir.kineuro.se",
+  "public": {
+    "bind": "0.0.0.0:30000"
+  },
+  "auth": {
+    "mode": "token",
+    "tokens": {}
+  },
+  "store": "/var/lib/kvasir/kvasir.sqlite",
+  "pepperFile": "/var/lib/kvasir/kvasir.pepper",
+  "sealKeyFile": "/var/lib/kvasir/kvasir.seal",
+  "admission": {
+    "queue": 64,
+    "waitCapSeconds": 1500,
+    "gate": false
+  },
+  "clients": {
+    "ledgerDays": 90
+  },
+  "cards": [
+    {
+      "id": "card0",
+      "driver": "docker",
+      "manage": true,
+      "minResidencySeconds": 60,
+      "idleReturnSeconds": 600,
+      "drainTimeoutSeconds": 600,
+      "startTimeoutSeconds": 1200,
+      "queueTimeoutSeconds": 1500,
+      "anthropicThinking": "disabled",
+      "note": "One card (RTX PRO 6000, 96 GB) holds one model at a time. Asking for the model that is not loaded swaps it in; that takes a few minutes (a cold swap). status says which model is loaded; the default is loaded again after 10 minutes without use of the other.",
+      "models": [
+        {
+          "id": "qwen3.8-flash-next",
+          "aliases": [
+            "flash-next",
+            "Qwen/Qwen3.8-Flash-Next"
+          ],
+          "container": "sgl-next",
+          "upstream": "http://127.0.0.1:31001",
+          "default": true,
+          "spec": {
+            "context_length": 262144,
+            "max_output_tokens": 65536,
+            "max_concurrent_requests": 4,
+            "capabilities": {
+              "tools": true,
+              "reasoning": true,
+              "reasoning_default": "on; send chat_template_kwargs {\"enable_thinking\": false} to turn it off",
+              "vision": true,
+              "structured_output": true,
+              "streaming": true
+            },
+            "apis": [
+              "openai /v1/chat/completions",
+              "openai /v1/completions",
+              "anthropic /v1/messages"
+            ],
+            "architecture": "MoE, GDN + Qwen Sparse Attention hybrid, 125B + 51B n-gram embeddings, 6B active, MTP",
+            "quantization": "NVFP4 (RadixArk export); n-gram table FP8 in host RAM",
+            "speculative_decoding": "MTP (NEXTN, 3 steps)",
+            "measured": {
+              "single_stream_tok_s": 140,
+              "ttft_s": 1.0,
+              "date": "2026-09-23"
+            },
+            "license": "Qwen Community License 1.0 (internal use; a service for third parties needs a separate licence)",
+            "runtime": "SGLang dev-qwen38-next-local",
+            "swap_in_seconds": 230
+          }
+        },
+        {
+          "id": "qwen38-27b",
+          "aliases": [
+            "qwen38-27b-fast",
+            "qwen3.8-27b",
+            "Qwen/Qwen3.8-27B"
+          ],
+          "container": "sgl-27b",
+          "upstream": "http://127.0.0.1:31002",
+          "spec": {
+            "context_length": 262144,
+            "max_output_tokens": 65536,
+            "max_concurrent_requests": 8,
+            "capabilities": {
+              "tools": true,
+              "reasoning": true,
+              "reasoning_default": "on; send chat_template_kwargs {\"enable_thinking\": false} to turn it off",
+              "vision": true,
+              "structured_output": true,
+              "streaming": true
+            },
+            "apis": [
+              "openai /v1/chat/completions",
+              "openai /v1/completions",
+              "anthropic /v1/messages"
+            ],
+            "architecture": "dense 27B, GDN hybrid (16 of 64 layers full attention)",
+            "quantization": "BF16 weights, FP8 KV cache",
+            "speculative_decoding": "none",
+            "measured": {
+              "single_stream_tok_s": 27,
+              "aggregate_tok_s_8_streams": 101,
+              "date": "2026-09-09"
+            },
+            "license": "Apache-2.0",
+            "runtime": "SGLang dev-qwen38-27b-dflash2",
+            "note": "the model the NILS assistant's stations are proven on"
+          }
+        }
+      ]
+    }
+  ]
+}

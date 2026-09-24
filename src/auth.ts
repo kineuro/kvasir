@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import type { JWTPayload } from "jose";
 import { createLocalJWKSet, createRemoteJWKSet, decodeProtectedHeader, jwtVerify } from "jose";
+import type { ClientKey, Clients } from "./clients.js";
 import type { KeyRow, Keys } from "./keys.js";
 
 /** Every grant: a page and how far a caller goes there, see or work, which includes see; the assistant has use. */
@@ -162,6 +163,8 @@ export interface Principal {
   kind: "person" | "machine" | "key";
   display?: string;
   key?: KeyRow;
+  /** A client key (record 47): it opens the public doors only, and holds no grant. */
+  client?: ClientKey;
 }
 
 export class Refused extends Error {
@@ -188,6 +191,7 @@ export class Auth {
   constructor(
     readonly config: AuthConfig,
     private readonly keys: Keys | null,
+    private readonly clients: Clients | null = null,
   ) {
     for (const t of config.trust ?? []) {
       const keys = t.jwks.startsWith("http")
@@ -203,13 +207,20 @@ export class Auth {
   /** The caller of a request, or a refusal that names why. */
   async principal(req: IncomingMessage): Promise<Principal> {
     const header = req.headers.authorization ?? "";
-    const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    // a key comes as a bearer, or in x-api-key as Anthropic's clients send it (record 47)
+    const bearer =
+      (/^bearer /iu.test(header) ? header.slice(7).trim() : "") ||
+      String(req.headers["x-api-key"] ?? "").trim();
     // a minted key, in any mode: it acts by its purposes and its class, and holds the reader's set it always held
     if (bearer.startsWith("kvs_")) {
       const row = this.keys?.verify(bearer);
       if (!row) throw new Refused(401, "this key is not one Kvasir minted, or it is spent");
       return { subject: row.principal, ...SETS.reader, kind: "key", key: row };
     }
+    // a client key (record 47), in any mode: no grant, and only the doors meant for clients
+    const client = bearer ? this.clients?.verify(bearer) : null;
+    if (client === "revoked") throw new Refused(401, "this key was revoked");
+    if (client) return { subject: `client:${client.name}`, grants: [], detail: "plain", kind: "key", client };
     // A token the installer wrote opens token mode, and beside a trust list
     // it stays the installer's own way in: what set the gateway up, such as
     // the command that mints the assistant's key, still reaches the doors of

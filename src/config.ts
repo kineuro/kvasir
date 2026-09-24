@@ -7,6 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { cardsOf } from "./card-config.js";
 import { HUB } from "./local.js";
 
 export type BackendKind = "openai-completions" | "anthropic-messages" | "openai-codex-responses";
@@ -27,6 +28,14 @@ export interface ModelEntry {
   contextWindow: number;
   maxTokens: number;
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Other names a client may ask for this model by (record 47), as modelgate's aliases. */
+  aliases?: string[];
+  /**
+   * The model's specs as its operator or its server gave them (record 47): the
+   * card's `spec`, or one entry of a model server's `/v1/models`, kept whole for
+   * the listing (src/served.ts).
+   */
+  spec?: Record<string, unknown>;
 }
 
 export interface BackendConfig {
@@ -63,6 +72,27 @@ export interface BackendConfig {
   inlineReasoning?: import("./reasoning.js").InlineReasoning;
   /** Kvasir's own backend, never added, stored or removed: ChatGPT through each person's own subscription (record 23). */
   builtin?: boolean;
+  /**
+   * The doors this backend speaks natively (record 47), whose requests Kvasir
+   * forwards as the client sent them: `chat-completions`, `completions`,
+   * `messages` (Anthropic's, with `count_tokens`) and `responses`. SGLang
+   * speaks all four. None when absent: `/v1/chat/completions` then goes
+   * through pi-ai as before, and the other doors refuse the backend's models.
+   */
+  passThrough?: import("./served.js").Protocol[];
+  /**
+   * An Anthropic `/v1/messages` request without `thinking`: `disabled`, the
+   * default, sends it on as thinking disabled, as Anthropic's own API behaves
+   * and modelgate did; `as-sent` leaves it to the model's own default.
+   */
+  anthropicThinking?: "disabled" | "as-sent";
+  /** The card this backend is a member of (record 47): one model of a group sharing one device, loaded when asked for. */
+  card?: string;
+  /**
+   * A model server of the group's (record 47, R3): its models and specs were read from its `/v1/models` and
+   * the admin ticked which to use, each admitted one by one; one backend holds every model ticked.
+   */
+  server?: boolean;
 }
 
 /**
@@ -105,14 +135,44 @@ export interface Config {
   local: { endpoint: string; runtime: RuntimeConfig | null };
   /** Where Kvasir runs in a container (record 24): the name it reaches the machine's own loopback by. */
   hostAlias: string | null;
+  /**
+   * The doors meant for the public route (record 47, R6). `doors` lists them as
+   * `METHOD /path`, a path ending in `*` for every path under it. A client key
+   * opens these doors and no other, wherever it calls. `bind`, when set, is a
+   * second listener that answers these doors and nothing else, for the edge to
+   * route to; `bind` above then stays the internal one, with every door.
+   */
+  public: { bind: string | null; doors: string[] };
+  /** Client keys (record 47): the days a client key's ledger rows are kept (R8). */
+  clients: { ledgerDays: number };
+  /** The cards Kvasir serves (record 47): groups of models sharing one device, one loaded at a time. */
+  cards: import("./card-config.js").CardConfig[];
 }
 
+/**
+ * The doors a client key opens, and the only ones a public listener answers, unless kvasir.json lists others.
+ * `{id}` stands for a model's name, which may hold a slash, and never for a door of Kvasir's own (OWN_DOORS).
+ */
+export const PUBLIC_DOORS = [
+  "GET /v1/models",
+  "GET /v1/models/{id}",
+  "POST /v1/chat/completions",
+  "POST /v1/completions",
+  "POST /v1/messages",
+  "POST /v1/messages/count_tokens",
+  "POST /v1/responses",
+  "GET /health",
+];
+
 export function parse(text: string): Config {
-  const raw = JSON.parse(text) as Omit<Partial<Config>, "local" | "hostAlias"> & {
+  const raw = JSON.parse(text) as Omit<Partial<Config>, "local" | "hostAlias" | "cards"> & {
+    cards?: unknown;
     backends?: unknown;
     oauth?: unknown;
     local?: { endpoint?: unknown; runtime?: unknown };
     hostAlias?: unknown;
+    public?: unknown;
+    clients?: unknown;
   };
   if (!raw.bind || !raw.origin) throw new Error("kvasir.json: bind and origin");
   if (raw.backends !== undefined)
@@ -121,6 +181,7 @@ export function parse(text: string): Config {
     );
   if (raw.oauth !== undefined)
     throw new Error("kvasir.json: oauth is not a setting; a person signs in to their own subscription");
+  const local = { endpoint: endpointOf(raw.local?.endpoint), runtime: runtimeOf(raw.local?.runtime) };
   return {
     bind: raw.bind,
     origin: raw.origin.replace(/\/+$/u, ""),
@@ -134,9 +195,65 @@ export function parse(text: string): Config {
     },
     sealKeyFile: raw.sealKeyFile ?? "kvasir.seal",
     purposes: purposes(raw.purposes ?? []),
-    local: { endpoint: endpointOf(raw.local?.endpoint), runtime: runtimeOf(raw.local?.runtime) },
+    local,
     hostAlias: hostAliasOf(raw.hostAlias),
+    public: publicOf(raw.public),
+    clients: clientsOf(raw.clients),
+    cards: cardsOf(raw.cards, local.runtime),
   };
+}
+
+/** The public doors and their listener (record 47). */
+function publicOf(value: unknown): Config["public"] {
+  if (value === undefined || value === null) return { bind: null, doors: [...PUBLIC_DOORS] };
+  if (typeof value !== "object" || Array.isArray(value))
+    throw new Error(
+      "kvasir.json: public is { bind, doors }: the listener and the doors meant for the public route",
+    );
+  const v = value as { bind?: unknown; doors?: unknown };
+  if (v.bind !== undefined && v.bind !== null && (typeof v.bind !== "string" || !v.bind))
+    throw new Error("kvasir.json: public.bind is an address such as 0.0.0.0:30000");
+  const doors = v.doors === undefined ? [...PUBLIC_DOORS] : v.doors;
+  if (
+    !Array.isArray(doors) ||
+    !doors.every((d) => typeof d === "string" && /^(GET|POST|PUT|DELETE) \/\S*$/u.test(d))
+  )
+    throw new Error(
+      "kvasir.json: public.doors lists doors as METHOD /path, such as POST /v1/chat/completions",
+    );
+  return { bind: typeof v.bind === "string" ? v.bind : null, doors: doors as string[] };
+}
+
+function clientsOf(value: unknown): Config["clients"] {
+  const days = (value as { ledgerDays?: unknown } | undefined)?.ledgerDays;
+  if (days === undefined) return { ledgerDays: 90 };
+  if (typeof days !== "number" || !Number.isInteger(days) || days < 1)
+    throw new Error("kvasir.json: clients.ledgerDays is a whole number of days");
+  return { ledgerDays: days };
+}
+
+/**
+ * Doors of Kvasir's own under a public path, which no public door opens, whatever kvasir.json lists: the
+ * model lifecycle lives under /v1/models beside the models a client reads.
+ */
+export const OWN_DOORS = ["/v1/models/lifecycle"];
+
+/**
+ * Whether a door is one of the listed public doors: a path as it is, `{id}` for the rest of the path (one
+ * name or more, never empty), or `*` for anything under it; never one of OWN_DOORS or below one.
+ */
+export function isPublic(doors: string[], method: string, path: string): boolean {
+  if (OWN_DOORS.some((own) => path === own || path.startsWith(`${own}/`))) return false;
+  return doors.some((d) => {
+    const at = d.indexOf(" ");
+    if (d.slice(0, at) !== method) return false;
+    const p = d.slice(at + 1);
+    if (p.endsWith("/{id}")) {
+      const base = p.slice(0, -"{id}".length);
+      return path.startsWith(base) && path.length > base.length && !path.slice(base.length).startsWith("/");
+    }
+    return p.endsWith("*") ? path.startsWith(p.slice(0, -1)) : path === p;
+  });
 }
 
 /** The hub local models download from: huggingface.co, or the mirror kvasir.json names. */
