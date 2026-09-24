@@ -149,10 +149,13 @@ export interface Config {
   cards: import("./card-config.js").CardConfig[];
 }
 
-/** The doors a client key opens, and the only ones a public listener answers, unless kvasir.json lists others. */
+/**
+ * The doors a client key opens, and the only ones a public listener answers, unless kvasir.json lists others.
+ * `{id}` stands for a model's name, which may hold a slash, and never for a door of Kvasir's own (OWN_DOORS).
+ */
 export const PUBLIC_DOORS = [
   "GET /v1/models",
-  "GET /v1/models/*",
+  "GET /v1/models/{id}",
   "POST /v1/chat/completions",
   "POST /v1/completions",
   "POST /v1/messages",
@@ -229,12 +232,26 @@ function clientsOf(value: unknown): Config["clients"] {
   return { ledgerDays: days };
 }
 
-/** Whether a door is one of the listed public doors. */
+/**
+ * Doors of Kvasir's own under a public path, which no public door opens, whatever kvasir.json lists: the
+ * model lifecycle lives under /v1/models beside the models a client reads.
+ */
+export const OWN_DOORS = ["/v1/models/lifecycle"];
+
+/**
+ * Whether a door is one of the listed public doors: a path as it is, `{id}` for the rest of the path (one
+ * name or more, never empty), or `*` for anything under it; never one of OWN_DOORS or below one.
+ */
 export function isPublic(doors: string[], method: string, path: string): boolean {
+  if (OWN_DOORS.some((own) => path === own || path.startsWith(`${own}/`))) return false;
   return doors.some((d) => {
     const at = d.indexOf(" ");
     if (d.slice(0, at) !== method) return false;
     const p = d.slice(at + 1);
+    if (p.endsWith("/{id}")) {
+      const base = p.slice(0, -"{id}".length);
+      return path.startsWith(base) && path.length > base.length && !path.slice(base.length).startsWith("/");
+    }
     return p.endsWith("*") ? path.startsWith(p.slice(0, -1)) : path === p;
   });
 }

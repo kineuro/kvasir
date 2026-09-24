@@ -617,8 +617,11 @@ export class Cards {
     }
   }
 
-  /** `/health` in modelgate's shape: 200 while every card serves or swaps; the first card's state, and each card's. */
-  health(): { status: number; body: Record<string, unknown> } {
+  /**
+   * `/health` in modelgate's shape: 200 while every card serves or swaps; the first card's state, and each
+   * card's. Why a card failed (a start's own output) is said only with `details`, to a caller holding a grant.
+   */
+  health(details = false): { status: number; body: Record<string, unknown> } {
     const ok = this.list.every((c) => c.ok());
     const first = this.list[0];
     return {
@@ -627,7 +630,12 @@ export class Cards {
         status: ok ? "ok" : (this.list.find((c) => !c.ok())?.state ?? "failed"),
         loaded: first?.loaded ?? null,
         state: first?.state ?? "ready",
-        cards: this.list.map((c) => ({ id: c.id, state: c.state, loaded: c.loaded, error: c.error })),
+        cards: this.list.map((c) => ({
+          id: c.id,
+          state: c.state,
+          loaded: c.loaded,
+          ...(details ? { error: c.error } : {}),
+        })),
       },
     };
   }

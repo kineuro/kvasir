@@ -53,6 +53,16 @@ async function fakeSGLang(served: string, seen: Seen[]) {
     const body = text ? JSON.parse(text) : {};
     seen.push({ model: served, path: req.url ?? "", body });
     if (body.model !== served) return whole(res, 404, { error: `no model ${body.model}` });
+    // an answer refused as SGLang refuses one, whole and in JSON, whatever the request asked
+    if (body.max_tokens === 13)
+      return whole(res, 400, { error: { message: "bad max_tokens", type: "invalid_request_error" } });
+    // headers of one hop, and of the server's own, beside one of the answer's
+    if (body.messages?.[0]?.content === "Hop.") {
+      res.setHeader("set-cookie", "sid=the-servers-own");
+      res.setHeader("x-hop", "one hop only");
+      res.setHeader("connection", "x-hop");
+      res.setHeader("x-served-by", served);
+    }
     const usage = { prompt_tokens: 20, completion_tokens: 7, total_tokens: 27 };
     if (req.url === "/v1/chat/completions") {
       const last = (body.messages as { role: string; content: unknown }[]).at(-1);
@@ -439,6 +449,35 @@ describe("modelgate's smoke sequence through a card", () => {
     expect(r.text.startsWith("\n")).toBe(true);
     expect(JSON.parse(r.text).choices[0].message.content).toBe(`Hej from ${FLASH}`);
     expect(docker.moves).toEqual(["stop sgl-27b", "start sgl-next"]);
+  });
+
+  it("passes a backend's refusal after early stream headers as an error event, not a bare body", async () => {
+    // the dense model is cold again: the stream waits for the swap, then SGLang refuses it in JSON
+    const r = await timed(url, "/v1/chat/completions", NIMA, {
+      model: DENSE,
+      stream: true,
+      max_tokens: 13,
+      messages: [{ role: "user", content: "Count." }],
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers["content-type"]).toBe("text/event-stream");
+    expect(r.headersMs).toBeLessThan(START_MS - 500);
+    const events = r.text.split("\n\n").filter((b) => b.startsWith("data:"));
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0].slice(5)).error.message).toBe("bad max_tokens");
+    expect(r.text).not.toMatch(/^\{/mu);
+  });
+
+  it("keeps the backend's cookie and the headers of one hop from the client", async () => {
+    const r = await post(url, "/v1/chat/completions", bearer(NIMA), {
+      model: DENSE,
+      messages: [{ role: "user", content: "Hop." }],
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("x-served-by")).toBe(DENSE);
+    expect(r.headers.get("set-cookie")).toBeNull();
+    expect(r.headers.get("x-hop")).toBeNull();
+    await r.body?.cancel();
   });
 
   it("refuses a revoked key", async () => {

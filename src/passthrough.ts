@@ -241,11 +241,24 @@ class Meter {
   }
 }
 
+/** The headers `Connection` names, which belong to one hop as the fixed ones do (RFC 9110, 7.6.1). */
+function hopNamed(headers: IncomingHttpHeaders): Set<string> {
+  const named = headers.connection;
+  const list = Array.isArray(named) ? named.join(",") : (named ?? "");
+  return new Set(
+    list
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
 /** The request's headers a backend receives: the client's, less one hop's and Kvasir's own, and the backend's key. */
 function forwarded(headers: IncomingHttpHeaders, lease: Lease, length: number): OutgoingHttpHeaders {
   const out: OutgoingHttpHeaders = {};
+  const named = hopNamed(headers);
   for (const [k, v] of Object.entries(headers)) {
-    if (v === undefined || HOP.has(k) || k.startsWith("x-kvasir-")) continue;
+    if (v === undefined || HOP.has(k) || named.has(k) || k.startsWith("x-kvasir-")) continue;
     out[k] = v;
   }
   out["content-type"] = "application/json";
@@ -254,10 +267,12 @@ function forwarded(headers: IncomingHttpHeaders, lease: Lease, length: number): 
   return out;
 }
 
-/** The answer's headers the client receives: the backend's, less one hop's. */
+/** The answer's headers the client receives: the backend's, less one hop's and the cookies it would set. */
 function answered(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
   const out: OutgoingHttpHeaders = {};
-  for (const [k, v] of Object.entries(headers)) if (v !== undefined && !HOP.has(k)) out[k] = v;
+  const named = hopNamed(headers);
+  for (const [k, v] of Object.entries(headers))
+    if (v !== undefined && !HOP.has(k) && !named.has(k) && k !== "set-cookie") out[k] = v;
   return out;
 }
 
@@ -552,7 +567,13 @@ export async function passThrough(
           // an answer that is not JSON goes to the client as it is, uncounted
         }
       } else outcome = "error";
-      if (committed) {
+      if (committed && stream) {
+        // a stream's headers went while it waited: a whole answer, which a backend gives when it refuses,
+        // is an event, an error event where it refused
+        if (status >= 400)
+          res.write(errorEvent(protocol, "api_error", `the backend answered ${status}`, answer));
+        else res.write(`data: ${answer}\n\n`);
+      } else if (committed) {
         // the headers went while the request waited (200, JSON): the answer follows the newlines as it came,
         // and an error the backend answered is the body, in the door's own shape where it was not JSON
         let parsed = false;

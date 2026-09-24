@@ -198,6 +198,51 @@ export function specOf(raw: unknown): ServedSpec {
   };
 }
 
+/** The spec fields `/v1/models` shows beside the ones Kvasir reads itself, as modelgate's operators write them. */
+export const SPEC_FIELDS = [
+  "name",
+  "capabilities",
+  "apis",
+  "architecture",
+  "quantization",
+  "speculative_decoding",
+  "measured",
+  "license",
+  "runtime",
+  "note",
+  "swap_in_seconds",
+] as const;
+
+const SHORT = 500;
+const plain = (v: unknown): v is string | number | boolean =>
+  (typeof v === "string" && v.length <= SHORT) ||
+  (typeof v === "number" && Number.isFinite(v)) ||
+  typeof v === "boolean";
+
+/**
+ * What of a spec a listing shows: the known fields only, each a short string, a number or a truth value; `apis`
+ * a short list of strings; `capabilities` and `measured` one level of such values. What a server or an
+ * operator wrote besides is kept out of the public list.
+ */
+export function publicSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of SPEC_FIELDS) {
+    const v = spec[field];
+    if (v === undefined) continue;
+    if (field === "apis") {
+      if (Array.isArray(v)) out.apis = v.filter((a) => typeof a === "string" && a.length <= 100).slice(0, 16);
+    } else if (field === "capabilities" || field === "measured") {
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const flat = Object.entries(v as Record<string, unknown>)
+          .filter(([k, x]) => k.length <= 64 && plain(x))
+          .slice(0, 32);
+        out[field] = Object.fromEntries(flat);
+      }
+    } else if (plain(v)) out[field] = v;
+  }
+  return out;
+}
+
 /**
  * A model in modelgate's shape: the id, its aliases, default and status, the two limits, then the rest of its
  * specs. `isDefault` is whether a request that names no model goes to it, as modelgate marks one model.
@@ -215,9 +260,9 @@ export function modelObject(m: ServedModel, isDefault = m.default): Record<strin
     max_output_tokens: m.maxOutputTokens,
     max_concurrent_requests: m.concurrency,
     ...(m.protocols.length > 0 ? { apis: m.protocols.map((p) => API_NAMES[p]) } : {}),
-    ...m.spec,
+    ...publicSpec(m.spec),
     capabilities: {
-      ...((m.spec.capabilities as Record<string, unknown> | undefined) ?? {}),
+      ...((publicSpec(m.spec).capabilities as Record<string, unknown> | undefined) ?? {}),
       tools: m.tools,
       reasoning: m.reasoning,
       vision: m.vision,

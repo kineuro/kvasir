@@ -191,8 +191,11 @@ export function build(
       return;
     }
     if (path === "/health" && req.method === "GET") {
-      // modelgate's shape, for the probe on the model server (record 47): 200 while every card serves or swaps
-      const h = cards.health();
+      // modelgate's shape, for the probe on the model server (record 47): 200 while every card serves or swaps.
+      // Anyone reads the state and the loaded model; why a card failed goes only to a caller with a grant on
+      // the internal listener
+      const caller = surface === "all" ? await auth.principal(req).catch(() => null) : null;
+      const h = cards.health(caller !== null && !caller.client && caller.grants.length > 0);
       json(res, h.status, h.body);
       return;
     }
@@ -744,7 +747,14 @@ async function route(
       json(res, 400, { error: { code: "bad_request", message: e instanceof Error ? e.message : String(e) } });
     }
   } else if (path === "/v1/models/lifecycle" && req.method === "GET") {
-    // Wave 5 §9.5: every candidate with its state and its records; the desk's Teaching page reads it
+    // Wave 5 §9.5: every candidate with its state and its records; the desk's Teaching page reads it. A caller
+    // with a grant reads it; a client key holds none (record 47)
+    if (who.client || who.grants.length === 0)
+      return noGrant(
+        res,
+        READS,
+        "the lifecycle is read by a caller holding a grant, which a client key never does",
+      );
     const withEvents = url.searchParams.get("events") === "1";
     json(res, 200, {
       candidates: lifecycle.list().map((c) => (withEvents ? { ...c, events: lifecycle.events(c.id) } : c)),
@@ -980,6 +990,8 @@ const PASS_LIMIT = 64 << 20;
 
 /** The grant of the doors that change Kvasir. */
 const WORK: Grant[] = ["kvasir:work"];
+/** Any grant reads Kvasir's own state; kvasir:see is the least a desk caller holds for it. */
+const READS: Grant[] = ["kvasir:see"];
 /** What a subscription of one's own needs to be signed in, chosen, and to answer a stream (record 25). */
 const SUBSCRIBES: Grant[] = ["assistant:use", "kvasir:see"];
 const SUBSCRIBES_NEEDS = "a subscription of your own needs assistant:use and kvasir:see";

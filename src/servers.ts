@@ -12,7 +12,7 @@
 import type { BackendConfig, ModelEntry } from "./config.js";
 import { described, HeldRefused, idFrom, RUNTIME_BACKEND, type TryKind, tryBackend } from "./held.js";
 import { HUGGING_FACE } from "./local.js";
-import { type ServedStatus, specOf } from "./served.js";
+import { publicSpec, type ServedStatus, specOf } from "./served.js";
 import type { AdmissionRecord } from "./suite.js";
 
 /** One model a server offers, with its specs, as the desk shows it before an admin ticks it. */
@@ -66,6 +66,41 @@ export interface ServerHost {
 const statusOf = (v: unknown): ServedStatus =>
   v === "loaded" || v === "cold" || v === "loading" ? v : "unknown";
 
+/** The most of a server's `/v1/models` Kvasir reads, and the most models it takes from it. */
+export const OFFER_BYTES = 1 << 20;
+export const OFFER_MODELS = 256;
+
+/** The prefix a key staged for adding a model server is sealed under, before it is sealed under the backend. */
+export const STAGED = "server-staging:";
+
+/** A server's answer read up to `limit` bytes, refused beyond. */
+async function bounded(r: Response, limit: number, what: string): Promise<string> {
+  const said = Number(r.headers.get("content-length") ?? "");
+  if (Number.isFinite(said) && said > limit) {
+    await r.body?.cancel();
+    throw new HeldRefused(502, `${what} is more than 1 MiB`);
+  }
+  if (!r.body) return "";
+  const reader = r.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      throw new HeldRefused(502, `${what} is more than 1 MiB`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+const NAME_MAX = 256;
+const nameOf = (v: unknown): string | null =>
+  typeof v === "string" && v.trim() !== "" && v.length <= NAME_MAX ? v : null;
+
 /** A server's models as its `/v1/models` lists them, with what it says of each. */
 export async function offeredBy(
   baseUrl: string,
@@ -81,27 +116,38 @@ export async function offeredBy(
   } catch (e) {
     throw new HeldRefused(502, `${baseUrl}/models did not answer: ${e instanceof Error ? e.message : e}`);
   }
-  const text = await r.text();
+  if (!r.ok) await r.body?.cancel();
   if (!r.ok)
     throw new HeldRefused(
       r.status === 401 || r.status === 403 ? 401 : 502,
       `${baseUrl}/models answered ${r.status}${r.status === 401 || r.status === 403 ? ": the key was refused" : ""}`,
     );
+  const text = await bounded(r, OFFER_BYTES, `${baseUrl}/models`);
   let body: { data?: unknown; server?: unknown };
   try {
     body = JSON.parse(text);
   } catch {
     throw new HeldRefused(502, `${baseUrl}/models did not answer JSON`);
   }
-  if (!Array.isArray(body.data)) throw new HeldRefused(502, `${baseUrl}/models lists no data`);
+  if (!body || typeof body !== "object" || !Array.isArray(body.data))
+    throw new HeldRefused(502, `${baseUrl}/models lists no data`);
+  if (body.data.length > OFFER_MODELS)
+    throw new HeldRefused(502, `${baseUrl}/models lists more than ${OFFER_MODELS} models`);
   const models = body.data.flatMap((raw): Offered[] => {
-    const o = (raw ?? {}) as Record<string, unknown>;
-    if (typeof o.id !== "string" || !o.id) return [];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const o = raw as Record<string, unknown>;
+    const id = nameOf(o.id);
+    if (!id) return [];
     const s = specOf(o);
     return [
       {
-        id: o.id,
-        aliases: Array.isArray(o.aliases) ? o.aliases.filter((a): a is string => typeof a === "string") : [],
+        id,
+        aliases: Array.isArray(o.aliases)
+          ? o.aliases
+              .map(nameOf)
+              .filter((a): a is string => a !== null && a !== id)
+              .slice(0, 32)
+          : [],
         status: statusOf(o.status),
         default: o.default === true,
         context_length: s.contextLength,
@@ -111,15 +157,34 @@ export async function offeredBy(
         tools: s.tools,
         vision: s.vision,
         swap_in_seconds: s.swapInSeconds,
-        spec: { ...s.rest, ...(s.concurrency ? { max_concurrent_requests: s.concurrency } : {}) },
+        // only the spec fields Kvasir lists, never whatever else the server wrote
+        spec: { ...publicSpec(s.rest), ...(s.concurrency ? { max_concurrent_requests: s.concurrency } : {}) },
         held_by: null,
       },
     ];
   });
-  const server =
+  // the card's state as modelgate and Kvasir say it, and nothing else of the block
+  const said =
     body.server && typeof body.server === "object" && !Array.isArray(body.server)
       ? (body.server as Record<string, unknown>)
       : null;
+  const server = said
+    ? Object.fromEntries(
+        (
+          [
+            ["state", nameOf(said.state)],
+            ["loaded", nameOf(said.loaded)],
+            [
+              "last_swap_seconds",
+              typeof said.last_swap_seconds === "number" && Number.isFinite(said.last_swap_seconds)
+                ? said.last_swap_seconds
+                : null,
+            ],
+            ["note", typeof said.note === "string" ? said.note.slice(0, 500) : null],
+          ] as const
+        ).filter(([, v]) => v !== null),
+      )
+    : null;
   return { models, server };
 }
 
@@ -171,12 +236,24 @@ export class Servers {
     return { baseUrl: d.config.baseUrl, locality: d.config.locality, note: d.note };
   }
 
-  /** The key a request names: given once, or a reference to one sealed already (R4); none for a server that asks none. */
-  private keyOf(input: Record<string, unknown>): string | null {
+  /**
+   * The key a request names: given once, or a reference to one sealed already (R4); none for a server that
+   * asks none. A reference names a key staged for this (`server-staging:<name>`) or the id of this server's
+   * own backend (one held for the same address), never another credential, which would go to whatever address
+   * the request names.
+   */
+  private keyOf(input: Record<string, unknown>, baseUrl: string): string | null {
     if (typeof input.key === "string" && input.key.trim()) return input.key.trim();
     const ref = typeof input.key_ref === "string" ? input.key_ref.trim() : "";
     if (!ref) return null;
-    if (ref === HUGGING_FACE) throw new HeldRefused(400, `${HUGGING_FACE} is not a model server's key`);
+    const own = this.k.backends.list.find(
+      (b) => b.config.server === true && b.config.id === ref && b.config.baseUrl === baseUrl,
+    );
+    if (ref === HUGGING_FACE || (!ref.startsWith(STAGED) && !own))
+      throw new HeldRefused(
+        400,
+        `key_ref names a key staged for a model server (${STAGED}<name>) or the id of this server's own backend; ${ref} is neither`,
+      );
     const key = this.k.credentials.open(ref);
     if (key === null) throw new HeldRefused(404, `no key is sealed as ${ref}`);
     return key;
@@ -185,7 +262,7 @@ export class Servers {
   /** The models a server offers, with specs, and which of them a backend here holds already. Nothing is kept. */
   async offered(input: Record<string, unknown>): Promise<Offer> {
     const { baseUrl, note } = this.address(input.url ?? input.baseUrl);
-    const offer = await offeredBy(baseUrl, this.keyOf(input));
+    const offer = await offeredBy(baseUrl, this.keyOf(input, baseUrl));
     for (const m of offer.models) m.held_by = this.k.backends.find(m.id)?.backend.config.id ?? null;
     return { url: baseUrl, ...offer, ...(note ? { note } : {}) };
   }
@@ -222,7 +299,7 @@ export class Servers {
     log: (line: string) => void = () => {},
   ): Promise<{ backend: { id: string; models: string[] } | null; results: Ticked[]; note?: string }> {
     const { baseUrl, locality, note } = this.address(input.url ?? input.baseUrl, input.locality ?? "local");
-    const key = this.keyOf(input);
+    const key = this.keyOf(input, baseUrl);
     const asked = Array.isArray(input.models)
       ? input.models.filter((m): m is string => typeof m === "string" && m.trim() !== "")
       : [];
@@ -317,7 +394,7 @@ export class Servers {
     }
     // a key staged under a name of its own for this add is sealed under the backend now, so the stage goes
     const ref = typeof input.key_ref === "string" ? input.key_ref.trim() : "";
-    if (held && ref && ref !== id && !this.k.backends.get(ref)) this.k.credentials.delete(ref);
+    if (held && ref.startsWith(STAGED)) this.k.credentials.delete(ref);
     const states = new Map(offer.models.map((m) => [m.id, { status: m.status, default: m.default }]));
     if (held) this.states.set(id, states);
     return {

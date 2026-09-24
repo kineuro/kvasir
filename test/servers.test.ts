@@ -11,8 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
-import { modelList } from "../src/served.js";
+import { modelList, modelObject, type ServedModel } from "../src/served.js";
 import { build, type Kvasir, listen } from "../src/server.js";
+import { offeredBy } from "../src/servers.js";
 import { fakeRuntime, serve } from "./fake.js";
 
 const closers: (() => Promise<void> | void)[] = [];
@@ -118,14 +119,14 @@ describe("a model server as a backend", () => {
     const server = await modelServer();
     const { k, url } = await kvasir();
     // the key goes to Kvasir once, sealed under a name of the desk's choosing, and is named after (R4)
-    const sealed = await fetch(`${url}/v1/credentials/adding-1`, {
+    const sealed = await fetch(`${url}/v1/credentials/server-staging:adding-1`, {
       method: "PUT",
       headers: admin,
       body: JSON.stringify({ secret: KEY }),
     });
     expect(sealed.status).toBe(200);
     expect(JSON.stringify(await sealed.json())).not.toContain(KEY);
-    const query = `url=${encodeURIComponent(server.url)}&key_ref=adding-1`;
+    const query = `url=${encodeURIComponent(server.url)}&key_ref=server-staging:adding-1`;
     // listing a server needs kvasir:work
     expect((await fetch(`${url}/v1/servers/models?${query}`, { headers: reader })).status).toBe(403);
     const offer = await (await fetch(`${url}/v1/servers/models?${query}`, { headers: admin })).json();
@@ -163,7 +164,7 @@ describe("a model server as a backend", () => {
     const added = await fetch(`${url}/v1/servers`, {
       method: "POST",
       headers: admin,
-      body: JSON.stringify({ url: server.url, key_ref: "adding-1", models: ["qwen38-27b"] }),
+      body: JSON.stringify({ url: server.url, key_ref: "server-staging:adding-1", models: ["qwen38-27b"] }),
     });
     expect(added.status).toBe(201);
     const done = await added.json();
@@ -175,7 +176,7 @@ describe("a model server as a backend", () => {
     expect(new Set(server.asked)).toEqual(new Set(["qwen38-27b"]));
     // the key is sealed under the backend, once, and the staged name is gone
     expect(k.credentials.has("127-0-0-1")).toBe(true);
-    expect(k.credentials.has("adding-1")).toBe(false);
+    expect(k.credentials.has("server-staging:adding-1")).toBe(false);
     const backends = await (await fetch(`${url}/v1/backends`, { headers: admin })).json();
     const held = backends.backends.find((b: { id: string }) => b.id === "127-0-0-1");
     expect(held).toMatchObject({
@@ -284,9 +285,118 @@ describe("a model server as a backend", () => {
     });
     expect(none.status).toBe(404);
     const unsealed = await fetch(
-      `${url}/v1/servers/models?url=${encodeURIComponent(server.url)}&key_ref=nothing-sealed`,
+      `${url}/v1/servers/models?url=${encodeURIComponent(server.url)}&key_ref=server-staging:nothing-sealed`,
       { headers: admin },
     );
     expect(unsealed.status).toBe(404);
+  });
+});
+
+describe("what a model server's key and list may reach", () => {
+  it("opens only a staged key or the server's own, and lets go only a staged one", async () => {
+    const server = await modelServer();
+    const { k, url } = await kvasir();
+    // another credential Kvasir holds, which no model server's address may be sent
+    k.credentials.put("openai", KEY);
+    const listing = await fetch(
+      `${url}/v1/servers/models?url=${encodeURIComponent(server.url)}&key_ref=openai`,
+      { headers: admin },
+    );
+    expect(listing.status).toBe(400);
+    expect((await listing.json()).error.message).toMatch(/server-staging:/u);
+    const adding = await fetch(`${url}/v1/servers`, {
+      method: "POST",
+      headers: admin,
+      body: JSON.stringify({ url: server.url, key_ref: "openai", models: ["qwen38-27b"], id: "card0" }),
+    });
+    expect(adding.status).toBe(400);
+    expect(k.credentials.has("openai")).toBe(true);
+    expect(server.asked).toEqual([]);
+    // a backend that is not a model server is not a key for one either
+    await expect(k.servers.offered({ url: server.url, key_ref: "chatgpt" })).rejects.toThrow(
+      /server-staging:/u,
+    );
+    // the server's own backend is: its key stays where it is sealed
+    await k.servers.admit({ url: server.url, key: KEY, models: ["qwen38-27b"], id: "card0" }, "test");
+    // but not for another address: the key of one server never goes to another
+    const other = await modelServer();
+    await expect(k.servers.offered({ url: other.url, key_ref: "card0" })).rejects.toThrow(/own backend/u);
+    expect(other.asked).toEqual([]);
+    await k.servers.admit({ url: server.url, key_ref: "card0", models: ["flash-next"] }, "test");
+    expect(k.credentials.has("card0")).toBe(true);
+    expect(k.credentials.has("openai")).toBe(true);
+  });
+
+  it("reads at most 1 MiB and 256 models of a server's list, and only what it can use of each", async () => {
+    let body = "";
+    const s = await serve((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(body);
+    });
+    closers.push(() => s.server.close());
+    const base = `${s.url}/v1`;
+    body = JSON.stringify({ data: [{ id: "m", padding: "x".repeat(1_100_000) }] });
+    await expect(offeredBy(base, null)).rejects.toThrow(/more than 1 MiB/u);
+    body = JSON.stringify({ data: Array.from({ length: 300 }, (_, i) => ({ id: `m${i}` })) });
+    await expect(offeredBy(base, null)).rejects.toThrow(/more than 256 models/u);
+    body = JSON.stringify({
+      data: [
+        { id: 7 },
+        { id: "x".repeat(300) },
+        {
+          id: "good",
+          aliases: ["g", 3, { a: 1 }],
+          status: "sleeping",
+          context_length: "lots",
+          capabilities: "all of them",
+          license: "Apache-2.0",
+          evil: "<script>alert(1)</script>",
+          measured: { tok_s: 27, deep: { deeper: true } },
+        },
+      ],
+      server: { state: "ready", loaded: "good", secret: "the-servers-own" },
+    });
+    const offer = await offeredBy(base, null);
+    expect(offer.models.map((m) => m.id)).toEqual(["good"]);
+    expect(offer.models[0]).toMatchObject({
+      aliases: ["g"],
+      status: "unknown",
+      context_length: null,
+      tools: false,
+      spec: { license: "Apache-2.0", measured: { tok_s: 27 } },
+    });
+    expect(offer.models[0].spec).not.toHaveProperty("evil");
+    expect(offer.server).toEqual({ state: "ready", loaded: "good" });
+  });
+
+  it("lists only the spec fields it knows, whatever a model's spec holds", () => {
+    const m: ServedModel = {
+      id: "m",
+      aliases: [],
+      upstream: "m",
+      backend: "b",
+      card: null,
+      default: true,
+      status: "loaded",
+      contextLength: 8192,
+      maxOutputTokens: 1024,
+      concurrency: 1,
+      reasoning: false,
+      tools: true,
+      vision: false,
+      protocols: [],
+      anthropicThinking: "disabled",
+      local: true,
+      spec: {
+        license: "MIT",
+        evil: "<script>",
+        runtime: { nested: "object" },
+        apis: ["openai /v1/chat/completions"],
+      },
+    };
+    const listed = modelObject(m);
+    expect(listed).toMatchObject({ license: "MIT", apis: ["openai /v1/chat/completions"] });
+    expect(listed).not.toHaveProperty("evil");
+    expect(listed).not.toHaveProperty("runtime");
   });
 });
