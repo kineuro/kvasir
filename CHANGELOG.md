@@ -4,6 +4,12 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.9] - 2026-09-25
+
+### Fixed
+
+- A request waiting on a card for a slot or a swap gets its first `: queued` and a stream its headers within a second of the start of its wait, and each beat after that a second apart. The wait used to start a whole second after every wake, so the first beat could come almost two seconds late.
+
 ## [1.0.0-alpha.8] - 2026-09-24
 
 ### Added
