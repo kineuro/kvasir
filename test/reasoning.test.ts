@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Reasoning a model leaves in its text, read apart from its answer: each family's
 // markers, a prompt that opened the thinking, stop tokens, and the same result
-// however the stream is cut.
+// however the stream is cut. The module is shared with kvasir, its home: its
+// stamp says it is the copy kvasir's scripts/share-reasoning.mjs wrote.
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type InlineReasoning, ReasoningSplitter, type Segment, splitReasoning } from "../src/reasoning.js";
 
@@ -27,6 +30,21 @@ const CASES: [string, string, { thinking: string; text: string }][] = [
     { thinking: "Counting the subjects.", text: "There are 38." },
   ],
   ["an empty block", "<think>\n\n</think>\n\nHello.", { thinking: "", text: "Hello." }],
+  [
+    "the thinking tag a model writes as text",
+    "<thinking>\nThe user wants a count.\n</thinking>\n\nThere are 38.",
+    { thinking: "The user wants a count.", text: "There are 38." },
+  ],
+  [
+    "the thinking tag with an answer wrapper",
+    "<thinking>x</thinking><answer>y</answer>",
+    { thinking: "x", text: "y" },
+  ],
+  [
+    "a thinking tag in the middle is the answer's",
+    "Wrap it in <thinking> tags.",
+    { thinking: "", text: "Wrap it in <thinking> tags." },
+  ],
   ["space before the opener", "\n\n<think>a</think>b", { thinking: "a", text: "b" }],
   [
     "Gemma 4",
@@ -95,6 +113,11 @@ describe("reasoning read apart from the answer", () => {
     expect(streamed("Weighing.<channel|>Done.", 4, "open")).toEqual({ thinking: "Weighing.", text: "Done." });
     // a whole text with a lone closing marker reads the same way
     expect(splitReasoning("Counting.\n</think>\n\n38.")).toEqual({ thinking: "Counting.", text: "38." });
+    expect(streamed("Counting.\n</thinking>\n\n38.", 3, "open")).toEqual({
+      thinking: "Counting.",
+      text: "38.",
+    });
+    expect(splitReasoning("Counting.\n</thinking>\n\n38.")).toEqual({ thinking: "Counting.", text: "38." });
   });
 
   it("leaves a closing marker quoted in code to the answer", () => {
@@ -115,5 +138,15 @@ describe("reasoning read apart from the answer", () => {
     expect(splitter.end()).toEqual([{ kind: "text", text: "<|im_" }]);
     const plain = new ReasoningSplitter();
     expect(plain.push("Hello")).toEqual([{ kind: "text", text: "Hello" }]);
+  });
+
+  it("is the shared module, unchanged since kvasir stamped it", () => {
+    const text = readFileSync(new URL("../src/reasoning.ts", import.meta.url), "utf8");
+    const stamp = /^\/\/ shared-sha256: ([0-9a-f]{64})\n/mu;
+    const declared = stamp.exec(text)?.[1];
+    const actual = createHash("sha256").update(text.replace(stamp, "")).digest("hex");
+    expect(actual, "change the splitter in kvasir and copy it with scripts/share-reasoning.mjs").toBe(
+      declared,
+    );
   });
 });

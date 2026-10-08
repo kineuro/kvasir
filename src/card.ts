@@ -524,6 +524,7 @@ export function entryOf(m: CardMemberConfig): ModelEntry {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     ...(m.aliases.length > 0 ? { aliases: m.aliases } : {}),
     spec: m.spec,
+    ...(m.inlineReasoning ? { inlineReasoning: m.inlineReasoning } : {}),
   };
 }
 
@@ -545,6 +546,7 @@ export function memberBackend(card: CardConfig, m: CardMemberConfig): BackendCon
     passThrough:
       card.driver.kind === "llama-router" ? PROTOCOLS.filter((p) => p !== "responses") : [...PROTOCOLS],
     anthropicThinking: card.anthropicThinking,
+    ...(card.inlineReasoning ? { inlineReasoning: card.inlineReasoning } : {}),
   };
 }
 

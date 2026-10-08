@@ -128,6 +128,11 @@ export function described(
     throw bad("locality: local, for a server in your own systems, or remote, for a provider");
   if ((!Array.isArray(o.models) || o.models.length === 0) && !opts.modelsOptional)
     throw bad("models: at least one model the server serves");
+  const inlineOf = (v: unknown, model: string): NonNullable<ModelEntry["inlineReasoning"]> => {
+    if (!["off", "markers", "open"].includes(String(v)))
+      throw bad(`${model ? `${model}: ` : ""}inlineReasoning: off, markers or open`);
+    return v as NonNullable<ModelEntry["inlineReasoning"]>;
+  };
   const models: ModelEntry[] = [];
   for (const raw of Array.isArray(o.models) ? o.models : []) {
     const m = (typeof raw === "string" ? { id: raw } : (raw ?? {})) as Record<string, unknown>;
@@ -157,6 +162,8 @@ export function described(
       ...(m.spec && typeof m.spec === "object" && !Array.isArray(m.spec)
         ? { spec: m.spec as Record<string, unknown> }
         : {}),
+      // how this model's text is read for reasoning left inline, over the backend's (record 55, B6)
+      ...(m.inlineReasoning !== undefined ? { inlineReasoning: inlineOf(m.inlineReasoning, id) } : {}),
     });
   }
   const named = typeof o.id === "string" && o.id.trim() !== "";
@@ -168,11 +175,7 @@ export function described(
   const config: BackendConfig = { id, kind, baseUrl, locality, concurrency, models };
   if (locality === "local") config.warmup = o.warmup !== false;
   if (o.server === true) config.server = true;
-  if (o.inlineReasoning !== undefined) {
-    if (!["off", "markers", "open"].includes(String(o.inlineReasoning)))
-      throw bad("inlineReasoning: off, markers or open");
-    config.inlineReasoning = o.inlineReasoning as BackendConfig["inlineReasoning"];
-  }
+  if (o.inlineReasoning !== undefined) config.inlineReasoning = inlineOf(o.inlineReasoning, "");
   if (o.compat !== undefined) {
     if (typeof o.compat !== "object" || o.compat === null || Array.isArray(o.compat))
       throw bad("compat: pi-ai's compatibility flags, an object");

@@ -7,7 +7,10 @@
 // messages the thinking default (a request without `thinking` goes on as
 // thinking disabled, as Anthropic's own API behaves). Tools, images, stop
 // sequences, response formats and every other field go as they came, and the
-// answer comes back as the backend wrote it, event for event.
+// answer comes back as the backend wrote it, event for event, but for one
+// thing: reasoning the model left inline in its text is read apart from the
+// answer, by the model's `inlineReasoning`, and given where the protocol keeps
+// reasoning (src/split-doors.ts, record 55, B6).
 //
 // Around that: the key's scopes, the context guard (a request whose input and
 // longest answer cannot fit the model's context is refused before a backend
@@ -42,6 +45,7 @@ import {
   type ServedCatalog,
   type ServedModel,
 } from "./served.js";
+import { splitsOn, splitWhole, streamSplit } from "./split-doors.js";
 
 /**
  * The bytes of text one token stands for at most, in the guard's estimate. A
@@ -426,6 +430,8 @@ export async function passThrough(
       );
   }
   const stream = body.stream === true;
+  const splitting =
+    splitsOn(path, protocol) && model.inlineReasoning !== "off" ? model.inlineReasoning : null;
   const strip =
     stream &&
     (protocol === "chat-completions" || protocol === "completions") &&
@@ -540,6 +546,8 @@ export async function passThrough(
       waited > 1000 ? { "x-model-load-wait": String(Math.round(waited / 1000)) } : {};
     if (sse) {
       if (!committed) commit(status, { ...answered(up.headers), ...extra });
+      // reasoning left inline, read apart as the stream passes (record 55, B6)
+      const split = status < 400 && splitting ? streamSplit(protocol, splitting) : null;
       const decoder = new TextDecoder();
       let buffer = "";
       for await (const chunk of up) {
@@ -549,20 +557,33 @@ export async function passThrough(
           const frame = buffer.slice(0, end);
           buffer = buffer.slice(end);
           if (meter.frame(frame.slice(0, m.index))) {
-            res.write(frame);
+            const instead = split?.frame(frame.slice(0, m.index)) ?? null;
+            if (instead === null) res.write(frame);
+            else for (const f of instead) res.write(`${f}\n\n`);
             touch();
           }
         }
       }
       buffer += decoder.decode();
+      for (const f of split?.end() ?? []) res.write(`${f}\n\n`);
       if (buffer) res.write(buffer);
       if (status >= 400 || meter.failed) outcome = "error";
     } else {
-      const whole = await collect(up);
-      const answer = whole.toString("utf8");
+      let whole = await collect(up);
+      let answer = whole.toString("utf8");
       if (status < 400) {
         try {
-          meter.whole(JSON.parse(answer));
+          const parsed = JSON.parse(answer);
+          meter.whole(parsed);
+          // reasoning left inline, read apart from the answer (record 55, B6)
+          const split =
+            splitting && parsed && typeof parsed === "object"
+              ? splitWhole(protocol, parsed, splitting)
+              : null;
+          if (split) {
+            answer = JSON.stringify(split);
+            whole = Buffer.from(answer, "utf8");
+          }
         } catch {
           // an answer that is not JSON goes to the client as it is, uncounted
         }
