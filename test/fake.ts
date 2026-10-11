@@ -88,8 +88,14 @@ export async function fakeRuntime(honours: boolean) {
     }
     if (tools.length > 0) {
       const f = FIXTURES.find((x) => x.prompt === last);
+      // a document argument goes as its text, as a model writes it
+      const args = f
+        ? Object.fromEntries(
+            Object.entries(f.args).map(([k, v]) => [k, f.documents?.includes(k) ? JSON.stringify(v) : v]),
+          )
+        : {};
       const call = f
-        ? { name: f.tool, arguments: JSON.stringify(f.args) }
+        ? { name: f.tool, arguments: JSON.stringify(args) }
         : { name: "nils_guide", arguments: "{}" };
       sse(res, [
         chunk({ role: "assistant", content: "" }),
