@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The admission suite's fixtures (Wave 4c section 8.6): our own tool
 // schemas, vendored from the engine's MCP door (tools/list, contract mcp
-// v1), and twenty prompts each of which a well-formed call answers. Data
-// only; the suite reads them, a person edits them.
+// v1), and twenty prompts each of which a well-formed call answers, in a
+// conversation that has read the guide already, as every conversation after
+// its first call has. Data only; the suite reads them, a person edits them.
 
 export interface ToolFixture {
   name: string;
@@ -304,11 +305,35 @@ export interface CallFixture {
   tool: string;
   /** Arguments the call must carry, with their values where the prompt fixes them. */
   args: Record<string, unknown>;
+  /**
+   * Arguments whose text is a document in JSON: the text is read and its
+   * value compared, so spacing and key order do not decide. The expected
+   * value in `args` is the document itself, not its text.
+   */
+  documents?: string[];
+  /**
+   * The conversation starts at the prompt. Without it the conversation opens
+   * with GUIDE_READ: nils_guide called and answered, as its own description
+   * asks first, so a prompt that names another tool is not answered with the
+   * guide.
+   */
+  fresh?: true;
 }
+
+/**
+ * The opening every fixture but a fresh one carries: the caller's first
+ * request, the guide's call and the guide's answer (abbreviated).
+ */
+export const GUIDE_READ = {
+  prompt: "Start by reading the guide.",
+  call: { id: "call_guide_0", name: "nils_guide", arguments: {} as Record<string, unknown> },
+  answer:
+    "The guide (abbreviated). A document asks one question: it names its sets, each with a grain and its clauses, and the answer's set; write it in YAML or JSON. Read the catalog for the levels and fields a document may name. Validate a document before running it, describe it to show a person what it asks, and preview it before a run. Prefer options and apply; draft is the fallback. The caps: a preview shows ten rows, a run leaves a handle whose rows are read page by page.",
+};
 
 /** Twenty prompts, one call each, over the schemas above. */
 export const FIXTURES: CallFixture[] = [
-  { prompt: "Read the guide before anything else.", tool: "nils_guide", args: {} },
+  { prompt: "Read the guide before anything else.", tool: "nils_guide", args: {}, fresh: true },
   { prompt: "Show me the catalog at the session level.", tool: "nils_catalog", args: { level: "session" } },
   { prompt: "List the catalog at the stack level.", tool: "nils_catalog", args: { level: "stack" } },
   {
@@ -350,9 +375,10 @@ export const FIXTURES: CallFixture[] = [
   { prompt: "Preview ten rows of document 9.", tool: "nils_preview", args: { document_id: 9, rows: 10 } },
   { prompt: "Preview document 2, three rows only.", tool: "nils_preview", args: { document_id: 2, rows: 3 } },
   {
-    prompt: "Draft a document from this text: sets: {scope: {grain: cohort}}",
+    prompt: 'Draft a document from this JSON: {"sets": {"scope": {"grain": "cohort"}}}',
     tool: "nils_draft",
-    args: { text: "sets: {scope: {grain: cohort}}" },
+    args: { text: { sets: { scope: { grain: "cohort" } } } },
+    documents: ["text"],
   },
   {
     prompt: "Run document 9 and name the handle september.",

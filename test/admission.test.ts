@@ -2,16 +2,26 @@
 // The admission suite of §8.6 against fake runtimes: one that honours the
 // schemas and refuses an oversized prompt, one that accepts and ignores;
 // the catalog gate; the record naming the runtime and the build; the
-// overhead of Kvasir's own door measured in process.
+// overhead of Kvasir's own door measured in process; and what the tool
+// calls check sends and how it names what failed.
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "../src/config.js";
+import { type CallFixture, GUIDE_READ } from "../src/fixtures/suite.js";
 import { build, type Kvasir, listen } from "../src/server.js";
-import { measureOverhead, runSuite, wellFormed } from "../src/suite.js";
-import { entry, fakeAnthropic, fakeRuntime, hold, local } from "./fake.js";
+import {
+  measureOverhead,
+  overflow,
+  runSuite,
+  sameDocument,
+  THINKING_BUDGET,
+  toolCalls,
+  wellFormed,
+} from "../src/suite.js";
+import { chunk, entry, fakeAnthropic, fakeRuntime, hold, local, serve, sse } from "./fake.js";
 
 const closers: (() => Promise<void> | void)[] = [];
 afterAll(async () => {
@@ -166,4 +176,143 @@ describe("the admission suite", () => {
     expect(wellFormed({ handle: "7" }, schema)).toBe("handle is not integer");
     expect(wellFormed({ handle: 7, extra: 1 }, schema)).toBe("unknown argument extra");
   });
+
+  it("compares a document's text by its value, not its spelling", () => {
+    const doc = { sets: { scope: { grain: "cohort" } } };
+    expect(sameDocument(doc, '{"sets": {"scope": {"grain": "cohort"}}}')).toBe(true);
+    expect(sameDocument(doc, '{\n  "sets": {\n    "scope": { "grain": "cohort" }\n  }\n}')).toBe(true);
+    expect(sameDocument(doc, '{"sets": {"scope": {"grain": "session"}}}')).toBe(false);
+    // a key added is not the document asked for, nor is text that is not JSON
+    expect(sameDocument(doc, '{"sets": {"scope": {"grain": "cohort", "where": []}}}')).toBe(false);
+    expect(sameDocument(doc, "sets: {scope: {grain: cohort}}")).toBe(false);
+    expect(sameDocument(doc, doc)).toBe(false);
+  });
+
+  /**
+   * A runtime that answers each prompt as the test scripts it and keeps every
+   * request: a call (name and arguments as text), or reasoning that runs out
+   * of budget with no call.
+   */
+  async function scripted(answers: Record<string, { name: string; arguments: string } | "thinks">) {
+    const seen: Record<string, unknown>[] = [];
+    const rt = await serve((req, res, text) => {
+      if (req.url === "/get_server_info") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const q = JSON.parse(text) as Record<string, unknown> & { messages: { content?: unknown }[] };
+      seen.push(q);
+      const answer = answers[String(q.messages.at(-1)?.content ?? "")] ?? "thinks";
+      const usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 };
+      if (answer === "thinks") {
+        sse(res, [
+          chunk({ role: "assistant", content: "" }),
+          chunk({ reasoning_content: "The user wants a call. Let me weigh the tools one by one" }),
+          chunk({}, "length", usage),
+          "[DONE]",
+        ]);
+        return;
+      }
+      sse(res, [
+        chunk({ role: "assistant", content: "" }),
+        chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: answer }] }),
+        chunk({}, "tool_calls", usage),
+        "[DONE]",
+      ]);
+    });
+    closers.push(() => rt.server.close());
+    return { url: rt.url, seen };
+  }
+
+  it("asks the tool calls with the guide read and a thinking budget, and names what failed apart from form", async () => {
+    const fixtures: CallFixture[] = [
+      { prompt: "Read the guide before anything else.", tool: "nils_guide", args: {}, fresh: true },
+      {
+        prompt: "What does the catalog hold at the cohort level?",
+        tool: "nils_catalog",
+        args: { level: "cohort" },
+      },
+      {
+        prompt: "Preview document 2, three rows only.",
+        tool: "nils_preview",
+        args: { document_id: 2, rows: 3 },
+      },
+      { prompt: "Read page 2 of handle 77.", tool: "nils_rows", args: { handle: 77, page: 2 } },
+      {
+        prompt: 'Draft a document from this JSON: {"sets": {"scope": {"grain": "cohort"}}}',
+        tool: "nils_draft",
+        args: { text: { sets: { scope: { grain: "cohort" } } } },
+        documents: ["text"],
+      },
+      { prompt: "What is the state of job 31?", tool: "nils_job_status", args: { job: 31 } },
+    ];
+    const rt = await scripted({
+      [fixtures[0].prompt]: { name: "nils_guide", arguments: "{}" },
+      // well formed, but the guide again: the wrong tool
+      [fixtures[1].prompt]: { name: "nils_guide", arguments: "{}" },
+      // the right tool, well formed, another value
+      [fixtures[2].prompt]: { name: "nils_preview", arguments: '{"document_id": 2, "rows": 4}' },
+      // the handle missing: a form error
+      [fixtures[3].prompt]: { name: "nils_rows", arguments: '{"page": 2}' },
+      // the same document spelt another way
+      [fixtures[4].prompt]: {
+        name: "nils_draft",
+        arguments: JSON.stringify({ text: '{\n  "sets": {\n    "scope": {"grain": "cohort"}\n  }\n}' }),
+      },
+      // fixtures[5] spends its budget thinking
+    });
+    const { k } = await kvasir([local(rt.url, "card", [{ ...entry("qwen", true), maxTokens: 65536 }])]);
+    const b = k.backends.list[0];
+    const check = await toolCalls(b, b.config.models[0], fixtures);
+    expect(check.passed).toBe(false);
+    expect(check.measured.validity).toBeCloseTo(2 / 6);
+    expect(check.measured.well_formed).toBeCloseTo(4 / 6);
+    expect(check.measured.by_kind).toEqual({ tool: 1, value: 1, form: 1, no_call: 1 });
+    const failures = check.measured.failures as { prompt: string; kind: string; why: string }[];
+    expect(failures.map((f) => [f.kind, f.why])).toEqual([
+      ["tool", "called nils_guide, expected nils_catalog"],
+      ["value", "rows is 4, expected 3"],
+      ["form", "missing handle"],
+      ["no_call", "0 calls (stop: length)"],
+    ]);
+    expect(check.detail).toBe(
+      "2 of 6 right (0.33; the bar is 0.95); 4 well formed; failed: 1 tool, 1 value, 1 form, 1 no_call",
+    );
+    // every call has a budget a thinking model can spend first
+    expect(rt.seen.map((q) => q.max_tokens)).toEqual(fixtures.map(() => THINKING_BUDGET));
+    // a fresh fixture starts at its prompt; every other opens with the guide called and answered
+    type Wire = {
+      role: string;
+      content?: unknown;
+      tool_calls?: { id: string; function: { name: string } }[];
+      tool_call_id?: string;
+    };
+    const fresh = rt.seen[0].messages as Wire[];
+    expect(fresh.map((m) => m.role)).toEqual(["system", "user"]);
+    const opened = rt.seen[1].messages as Wire[];
+    expect(opened.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
+    expect(opened[1].content).toBe(GUIDE_READ.prompt);
+    expect(opened[2].tool_calls?.map((c) => c.function.name)).toEqual(["nils_guide"]);
+    expect(opened[3].tool_call_id).toBe(opened[2].tool_calls?.[0].id);
+    expect(opened[3].content).toBe(GUIDE_READ.answer);
+    expect(opened[4].content).toBe(fixtures[1].prompt);
+  }, 30_000);
+
+  it("never asks more than the entry's own longest answer, and reasoning that fills an overflow's budget is output", async () => {
+    const rt = await scripted({});
+    const { k } = await kvasir([local(rt.url, "card", [{ ...entry("qwen", true), maxTokens: 1024 }])]);
+    const b = k.backends.list[0];
+    const fixture: CallFixture = {
+      prompt: "What is the state of job 31?",
+      tool: "nils_job_status",
+      args: { job: 31 },
+    };
+    await toolCalls(b, b.config.models[0], [fixture]);
+    expect(rt.seen.at(-1)?.max_tokens).toBe(1024);
+    // the runtime accepted the oversized prompt and thought: accepted, not truncated
+    const o = await overflow(b, { ...b.config.models[0], contextWindow: 64 });
+    expect(o.measured.flag).toBe("accepted");
+    expect(o.measured.thinking_chars).toBeGreaterThan(0);
+  }, 30_000);
 });

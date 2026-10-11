@@ -4,6 +4,11 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- The admission suite's tool calls check no longer fails a model for its own reasons. Each fixture asks up to 4,096 tokens (never more than the model's longest answer) in place of 512, since a runtime that thinks by default, as SGLang's Qwen does, spends its reasoning from the same budget, and 512 could end in reasoning with no call. Every fixture but the one that asks for the guide now opens with `nils_guide` already called and answered, so a prompt that names the catalog is not answered with the guide its description says to call first. The draft fixture's text is JSON and is compared by its value, so spacing and key order do not decide. The pass rule is unchanged (95 % of the twenty right), and each failure says what failed: `error`, `no_call` (with its stop reason), `calls`, `form`, `tool` (well formed, another tool) or `value` (the right tool, another value), counted in `by_kind` beside `well_formed`.
+- The chat template, enforced schema and stream integrity checks ask the same thinking budget, and the overflow check counts reasoning as output, so an oversized prompt a thinking model accepts is `accepted`, not `truncated`.
+
 ## [1.0.0-alpha.9] - 2026-09-25
 
 ### Fixed

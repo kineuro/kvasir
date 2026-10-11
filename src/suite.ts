@@ -10,7 +10,7 @@
 import type { AssistantMessage, AssistantMessageEvent, Context, Tool } from "@earendil-works/pi-ai";
 import type { Backend } from "./backends.js";
 import type { ModelEntry } from "./config.js";
-import { type CallFixture, FIXTURES, TOOLS, type ToolFixture } from "./fixtures/suite.js";
+import { type CallFixture, FIXTURES, GUIDE_READ, TOOLS, type ToolFixture } from "./fixtures/suite.js";
 
 export type CheckName = "tool_calls" | "chat_template" | "enforced_schema" | "overflow" | "stream_integrity";
 
@@ -62,6 +62,20 @@ export const THRESHOLDS = {
   overhead_p95_ms: 200,
 };
 
+/**
+ * The longest answer a check asks for where the model may think first. A
+ * runtime may think by default (SGLang's Qwen does) and the reasoning counts
+ * against max_tokens, so a budget sized for the answer alone can end in
+ * reasoning with no answer at all: 512 did for qwen38-27b's draft fixture
+ * on 2026-10-11, mostly under load. Never more than the entry's own longest
+ * answer.
+ */
+export const THINKING_BUDGET = 4096;
+
+function budget(entry: ModelEntry): number {
+  return Math.min(THINKING_BUDGET, entry.maxTokens);
+}
+
 /** The whole answer of one stream: the message, or the error, and the first token's time. */
 export async function collect(events: AsyncIterable<AssistantMessageEvent>): Promise<{
   message: AssistantMessage | null;
@@ -89,6 +103,10 @@ function textOf(m: AssistantMessage | null): string {
   return (m?.content ?? []).map((c) => (c.type === "text" ? c.text : "")).join("");
 }
 
+function thinkingOf(m: AssistantMessage | null): string {
+  return (m?.content ?? []).map((c) => (c.type === "thinking" ? c.thinking : "")).join("");
+}
+
 function callsOf(m: AssistantMessage | null): { name: string; arguments: Record<string, unknown> }[] {
   return (m?.content ?? []).flatMap((c) =>
     c.type === "toolCall"
@@ -113,6 +131,19 @@ export function matches(expected: unknown, actual: unknown): boolean {
     );
   }
   return expected === actual;
+}
+
+/** Whether a document's text, as JSON, holds the expected value: the same keys and values, whatever the spacing and the order. */
+export function sameDocument(expected: unknown, text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  let actual: unknown;
+  try {
+    actual = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  // carried both ways is equal: no key missing and none added
+  return matches(expected, actual) && matches(actual, expected);
 }
 
 /** A small validator over our own schemas: required present, no unknown key, top-level types right. */
@@ -169,6 +200,77 @@ function user(content: string): Context["messages"][number] {
   return { role: "user", content, timestamp: Date.now() };
 }
 
+/** A fixture's conversation: the guide already called and answered, unless the fixture is fresh. */
+export function conversation(f: CallFixture, backend: Backend, entry: ModelEntry): Context["messages"] {
+  if (f.fresh) return [user(f.prompt)];
+  const at = Date.now();
+  return [
+    user(GUIDE_READ.prompt),
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", ...GUIDE_READ.call }],
+      api: backend.config.kind,
+      provider: backend.config.id,
+      model: entry.upstream ?? entry.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: at,
+    } as AssistantMessage,
+    {
+      role: "toolResult",
+      toolCallId: GUIDE_READ.call.id,
+      toolName: GUIDE_READ.call.name,
+      content: [{ type: "text", text: GUIDE_READ.answer }],
+      isError: false,
+      timestamp: at,
+    },
+    user(f.prompt),
+  ];
+}
+
+/**
+ * What one fixture's answer got wrong, by kind: `error` the stream failed;
+ * `no_call` it ended without a call (its stop reason says why, length for a
+ * budget spent thinking); `calls` more than one call; `form` the call does not
+ * fit the schema of the tool it named; `tool` a well-formed call to another
+ * tool than the one asked; `value` the right tool, well formed, with a value
+ * other than the prompt fixed.
+ */
+export type CallFailure = "error" | "no_call" | "calls" | "form" | "tool" | "value";
+
+/** What one fixture's answer got wrong, or null when it is right. */
+function judge(
+  f: CallFixture,
+  out: { error: string | null; reason: string | null },
+  calls: { name: string; arguments: Record<string, unknown> }[],
+  byName: Map<string, ToolFixture>,
+): { kind: CallFailure | null; why: string } {
+  if (out.error) return { kind: "error", why: `error: ${out.error}` };
+  if (calls.length === 0) return { kind: "no_call", why: `0 calls (stop: ${out.reason ?? "none"})` };
+  if (calls.length > 1) return { kind: "calls", why: `${calls.length} calls` };
+  const call = calls[0];
+  const schema = byName.get(call.name)?.parameters;
+  const bad = schema ? wellFormed(call.arguments, schema) : `no tool named ${call.name}`;
+  if (bad) return { kind: "form", why: bad };
+  if (call.name !== f.tool) return { kind: "tool", why: `called ${call.name}, expected ${f.tool}` };
+  for (const [k, v] of Object.entries(f.args)) {
+    const actual = JSON.stringify(call.arguments[k]);
+    if (f.documents?.includes(k)) {
+      if (!sameDocument(v, call.arguments[k]))
+        return { kind: "value", why: `${k} is ${actual}, expected the document ${JSON.stringify(v)}` };
+    } else if (!matches(v, call.arguments[k]))
+      return { kind: "value", why: `${k} is ${actual}, expected ${JSON.stringify(v)}` };
+  }
+  return { kind: null, why: "" };
+}
+
 /** Check 1: twenty fixtures produce well-formed calls against our own schemas. */
 export async function toolCalls(
   backend: Backend,
@@ -177,39 +279,38 @@ export async function toolCalls(
 ): Promise<Check> {
   const tools = piTools(TOOLS, false);
   const byName = new Map(TOOLS.map((t) => [t.name, t]));
-  const results: { prompt: string; ok: boolean; why: string }[] = [];
+  const results: { prompt: string; ok: boolean; kind: CallFailure | null; why: string }[] = [];
+  let wellFormedCalls = 0;
   for (const f of fixtures) {
     const out = await collect(
       backend.stream(
         entry,
-        { systemPrompt: SYSTEM, messages: [user(f.prompt)], tools },
-        { temperature: 0, maxTokens: 512 },
+        { systemPrompt: SYSTEM, messages: conversation(f, backend, entry), tools },
+        { temperature: 0, maxTokens: budget(entry) },
       ),
     );
-    const calls = callsOf(out.message);
-    let why = "";
-    let ok = false;
-    if (out.error) why = `error: ${out.error}`;
-    else if (calls.length !== 1) why = `${calls.length} calls`;
-    else if (calls[0].name !== f.tool) why = `called ${calls[0].name}, expected ${f.tool}`;
-    else {
-      const bad = wellFormed(calls[0].arguments, byName.get(f.tool)?.parameters ?? {});
-      if (bad) why = bad;
-      else {
-        const missing = Object.entries(f.args).find(([k, v]) => !matches(v, calls[0].arguments[k]));
-        if (missing)
-          why = `${missing[0]} is ${JSON.stringify(calls[0].arguments[missing[0]])}, expected ${JSON.stringify(missing[1])}`;
-        else ok = true;
-      }
-    }
-    results.push({ prompt: f.prompt, ok, why });
+    const { kind, why } = judge(f, out, callsOf(out.message), byName);
+    if (kind === null || kind === "tool" || kind === "value") wellFormedCalls += 1;
+    results.push({ prompt: f.prompt, ok: kind === null, kind, why });
   }
-  const valid = results.filter((r) => r.ok).length / Math.max(1, results.length);
+  const right = results.filter((r) => r.ok).length;
+  const valid = right / Math.max(1, results.length);
+  const failures = results.filter((r) => !r.ok);
+  const byKind: Partial<Record<CallFailure, number>> = {};
+  for (const r of failures) if (r.kind) byKind[r.kind] = (byKind[r.kind] ?? 0) + 1;
+  const kinds = Object.entries(byKind)
+    .map(([k, n]) => `${n} ${k}`)
+    .join(", ");
   return {
     name: "tool_calls",
     passed: valid >= THRESHOLDS.tool_validity,
-    detail: `${results.filter((r) => r.ok).length} of ${results.length} well formed (${valid.toFixed(2)}; the bar is ${THRESHOLDS.tool_validity})`,
-    measured: { validity: valid, failures: results.filter((r) => !r.ok) },
+    detail: `${right} of ${results.length} right (${valid.toFixed(2)}; the bar is ${THRESHOLDS.tool_validity}); ${wellFormedCalls} well formed${kinds ? `; failed: ${kinds}` : ""}`,
+    measured: {
+      validity: valid,
+      well_formed: wellFormedCalls / Math.max(1, results.length),
+      by_kind: byKind,
+      failures,
+    },
   };
 }
 
@@ -222,7 +323,8 @@ export async function chatTemplate(backend: Backend, entry: ModelEntry): Promise
         systemPrompt: "You answer with one word and nothing else.",
         messages: [user("Answer with the single word: ready")],
       },
-      { temperature: 0, maxTokens: 256 },
+      // a model that thinks first spends its reasoning from the same budget as the word
+      { temperature: 0, maxTokens: budget(entry) },
     ),
   );
   const text = textOf(out.message).trim();
@@ -269,7 +371,7 @@ export async function enforcedSchema(backend: Backend, entry: ModelEntry): Promi
         messages: [user('Call where_clause with the clause ["=", "base", "T1w"].')],
         tools,
       },
-      { temperature: 0, maxTokens: 1024, toolChoice },
+      { temperature: 0, maxTokens: budget(entry), toolChoice },
     ),
   );
   const pos = callsOf(positive.message)[0];
@@ -283,7 +385,7 @@ export async function enforcedSchema(backend: Backend, entry: ModelEntry): Promi
         ],
         tools,
       },
-      { temperature: 0, maxTokens: 1024, toolChoice },
+      { temperature: 0, maxTokens: budget(entry), toolChoice },
     ),
   );
   const neg = callsOf(negative.message)[0];
@@ -353,16 +455,25 @@ export async function overflow(backend: Backend, entry: ModelEntry): Promise<Che
     backend.stream(entry, { messages: [user(prompt)] }, { temperature: 0, maxTokens: 32 }),
   );
   const text = textOf(out.message);
+  // reasoning is output too: a model that thinks first fills 32 tokens with it and says nothing yet
+  const thought = thinkingOf(out.message);
   let flag: AdmissionRecord["overflow"];
   if (out.error) flag = "error";
-  else if (out.reason === "length" && text.trim().length === 0) flag = "truncated";
+  else if (out.reason === "length" && text.trim().length === 0 && thought.trim().length === 0)
+    flag = "truncated";
   else flag = "accepted";
   return {
     name: "overflow",
     // every answer is a pass: the flag is what is published
     passed: true,
     detail: `an oversized prompt is ${flag === "error" ? "refused with an error" : flag === "truncated" ? "silently truncated (length stop, no output)" : "silently accepted"}`,
-    measured: { flag, error: out.error, reason: out.reason, output_chars: text.length },
+    measured: {
+      flag,
+      error: out.error,
+      reason: out.reason,
+      output_chars: text.length,
+      thinking_chars: thought.length,
+    },
   };
 }
 
@@ -379,7 +490,7 @@ export async function streamIntegrity(backend: Backend, entry: ModelEntry): Prom
     backend.stream(
       entry,
       { messages: [user("Think briefly, then answer: what is 17 + 25?")] },
-      { temperature: 0, maxTokens: 512 },
+      { temperature: 0, maxTokens: budget(entry) },
     ),
   );
   if (first.error || !first.message)
@@ -411,7 +522,7 @@ export async function streamIntegrity(backend: Backend, entry: ModelEntry): Prom
           user("And add 1 to that."),
         ],
       },
-      { temperature: 0, maxTokens: 512 },
+      { temperature: 0, maxTokens: budget(entry) },
     ),
   );
   const passed = !second.error;
