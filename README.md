@@ -75,6 +75,8 @@ node dist/main.js models add --server https://models.example.org/v1 --key-file s
 node dist/main.js models add --server https://models.example.org/v1 --key-file server.key --model qwen38-27b --config kvasir.json
 ```
 
+`--thinking on` asks every model of the server that reasons to think before it answers, and `--thinking off` turns it off, through the chat template's `enable_thinking`; without either the server's own default decides. Thinking is the backend's, for all of its models. `--max-tokens N` is the longest answer each model named is held with, never more than the server allows. Naming a model of a server Kvasir holds already with either changes them in place, without asking the models again.
+
 ## License
 
 AGPL-3.0-only, under the same [contributor license agreement](CLA.md) as the engine. See [CONTRIBUTING.md](CONTRIBUTING.md).

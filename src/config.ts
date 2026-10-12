@@ -12,6 +12,10 @@ import { HUB } from "./local.js";
 
 export type BackendKind = "openai-completions" | "anthropic-messages" | "openai-codex-responses";
 
+/** Whether a backend's models think before they answer: asked of them, or turned off. */
+export type Thinking = "on" | "off";
+export const THINKINGS: Thinking[] = ["on", "off"];
+
 /**
  * The adapters an admin adds a backend with (§8.1): a fixed list in code, never a URL a caller
  * names. ChatGPT through a person's own subscription is Kvasir's own backend, never added.
@@ -63,6 +67,18 @@ export interface BackendConfig {
    * otherwise. A client never sends any.
    */
   compat?: Record<string, unknown>;
+  /**
+   * Whether this backend's models think before they answer, on an OpenAI-shaped
+   * backend: `on` asks it of every model whose entry reasons and `off` turns it
+   * off, through the chat template's `enable_thinking`, which SGLang, vLLM and
+   * llama.cpp hand to the template and a Kvasir in front of one passes on.
+   * Absent, nothing is sent and the server's own default decides; SGLang's Qwen
+   * thinks by default. It is the backend's, so every purpose that goes to its
+   * models gets the same; it decides over any thinking flag in `compat`. It is
+   * for the streams Kvasir makes itself: a pass-through door forwards the
+   * client's request as it came.
+   */
+  thinking?: Thinking;
   /**
    * How this backend's text is read for reasoning a model left inline (the chat,
    * slice 9): "markers", the default, reads it from markers that open the output;

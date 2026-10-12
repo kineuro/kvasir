@@ -9,8 +9,16 @@
 // holds one model at a time. A model that is cold on the server loads there when
 // it is asked, which takes minutes, so its first request waits longer.
 
-import type { BackendConfig, ModelEntry } from "./config.js";
-import { described, HeldRefused, idFrom, RUNTIME_BACKEND, type TryKind, tryBackend } from "./held.js";
+import type { BackendConfig, ModelEntry, Thinking } from "./config.js";
+import {
+  described,
+  HeldRefused,
+  idFrom,
+  RUNTIME_BACKEND,
+  type TryKind,
+  thinkingOf,
+  tryBackend,
+} from "./held.js";
 import { HUGGING_FACE } from "./local.js";
 import { publicSpec, type ServedStatus, specOf } from "./served.js";
 import type { AdmissionRecord } from "./suite.js";
@@ -188,8 +196,46 @@ export async function offeredBy(
   return { models, server };
 }
 
-/** An offered model as a catalog entry: its limits from the server, or the defaults an admin gets today where it gives none. */
-export function entryFrom(o: Offered): ModelEntry {
+/** The longest answer a model is held with where nobody asked for one and its server says none. */
+export const ANSWER_TOKENS = 4_096;
+/**
+ * The same for a model asked to think first, whose reasoning is spent from the same budget: what the
+ * NILS assistant's bench measured thinking on with (2026-10-12).
+ */
+export const THINKING_ANSWER_TOKENS = 16_384;
+
+/** The settings an add gives a model server's backend: its thinking, and the longest answer of each model ticked. */
+export interface ServerSettings {
+  thinking: Thinking | null;
+  answer: number | null;
+}
+
+/** The longest answer an add asks for, where it asks: a whole number of tokens; anything else is refused. */
+export function answerOf(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 1 << 20)
+    throw new HeldRefused(
+      400,
+      "max_tokens: the longest answer each model is held with, a whole number of tokens",
+    );
+  return n;
+}
+
+/**
+ * The longest answer a model is held with: the one asked for, never more than its server allows or its
+ * context holds; where none was asked for, the server's own, and where the server says none either,
+ * 4,096 tokens, or 16,384 for a model that reasons on a backend that asks it to think.
+ */
+export function longestAnswer(o: Offered, s: Partial<ServerSettings> = {}): number {
+  const context = o.context_length ?? 32_768;
+  if (s.answer) return Math.min(s.answer, o.max_output_tokens ?? context, context);
+  if (o.max_output_tokens) return o.max_output_tokens;
+  return Math.min(context, s.thinking === "on" && o.reasoning ? THINKING_ANSWER_TOKENS : ANSWER_TOKENS);
+}
+
+/** An offered model as a catalog entry: its limits from the server, and its longest answer as the add's settings make it. */
+export function entryFrom(o: Offered, s: Partial<ServerSettings> = {}): ModelEntry {
   const context = o.context_length ?? 32_768;
   return {
     id: o.id,
@@ -197,7 +243,7 @@ export function entryFrom(o: Offered): ModelEntry {
     reasoning: o.reasoning,
     input: o.vision ? ["text", "image"] : ["text"],
     contextWindow: context,
-    maxTokens: o.max_output_tokens ?? Math.min(context, 4_096),
+    maxTokens: longestAnswer(o, s),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     ...(o.aliases.length > 0 ? { aliases: o.aliases } : {}),
     spec: {
@@ -289,15 +335,56 @@ export class Servers {
   }
 
   /**
+   * A held server's backend with the settings an add gives it: its thinking, and the longest answer of each
+   * model ticked that it holds already, never more than the server allows. Held again in place where they
+   * changed, as when a model is ticked later: its key and its other models stay, its admitted set is read
+   * again from the records, and the server is asked nothing.
+   */
+  private async settle(
+    held: BackendConfig,
+    ticked: Offered[],
+    s: ServerSettings,
+    by: string,
+    log: (line: string) => void,
+  ): Promise<BackendConfig> {
+    const models = held.models.map((m) => {
+      const o = s.answer ? ticked.find((t) => t.id === m.id) : undefined;
+      return o ? { ...m, maxTokens: longestAnswer(o, s) } : m;
+    });
+    const next: BackendConfig = { ...held, models, ...(s.thinking ? { thinking: s.thinking } : {}) };
+    if (JSON.stringify(next) === JSON.stringify(held)) return held;
+    this.k.held.replace(next, by);
+    const backend = this.k.backends.get(held.id);
+    if (backend) await this.k.admissions.loadOne(backend);
+    if (next.thinking !== held.thinking) log(`${held.id}: thinking ${next.thinking}`);
+    for (const m of models) {
+      const was = held.models.find((x) => x.id === m.id);
+      if (was && was.maxTokens !== m.maxTokens) log(`${m.id}: answers up to ${m.maxTokens} tokens`);
+    }
+    return backend?.config ?? next;
+  }
+
+  /**
    * The ticked models of a server admitted one by one: each asked one short question, held on the server's
    * one backend once it answered, and put through the admission suite where the server is local. A cold
    * model loads on the server when asked, so its question waits as long as the server says a load takes.
+   * The add may give the backend's thinking (`thinking`, on or off) and the longest answer each model it
+   * ticks is held with (`max_tokens`); a backend held already takes them too, and keeps its own where the
+   * add gives none.
    */
   async admit(
     input: Record<string, unknown>,
     by: string,
     log: (line: string) => void = () => {},
-  ): Promise<{ backend: { id: string; models: string[] } | null; results: Ticked[]; note?: string }> {
+  ): Promise<{
+    backend: { id: string; models: string[]; thinking?: Thinking } | null;
+    results: Ticked[];
+    note?: string;
+  }> {
+    const settings: ServerSettings = {
+      thinking: thinkingOf(input.thinking),
+      answer: answerOf(input.max_tokens),
+    };
     const { baseUrl, locality, note } = this.address(input.url ?? input.baseUrl, input.locality ?? "local");
     const key = this.keyOf(input, baseUrl);
     const asked = Array.isArray(input.models)
@@ -314,6 +401,9 @@ export class Servers {
     const named = typeof input.id === "string" && input.id.trim() ? input.id.trim() : null;
     let held = this.heldFor(named, baseUrl);
     const id = held?.id ?? this.freshId(named, baseUrl);
+    if (held) held = await this.settle(held, ticked, settings, by, log);
+    // a model ticked now thinks as its backend does: as this add says, else as the backend held it
+    const thinking = settings.thinking ?? held?.thinking ?? null;
     const results: Ticked[] = [];
     for (const o of ticked) {
       if (held?.models.some((m) => m.id === o.id)) {
@@ -338,7 +428,7 @@ export class Servers {
         });
         continue;
       }
-      const entry = entryFrom(o);
+      const entry = entryFrom(o, { ...settings, thinking });
       const cold = o.status === "cold" || o.status === "loading";
       const timeoutMs =
         typeof input.timeout_seconds === "number" && input.timeout_seconds > 0
@@ -357,6 +447,7 @@ export class Servers {
         models,
         warmup: false,
         server: true,
+        ...(thinking ? { thinking } : {}),
       };
       const tried = await tryBackend({ ...config, models: [entry] }, key, { timeoutMs });
       const answer = tried.models[0];
@@ -398,7 +489,13 @@ export class Servers {
     const states = new Map(offer.models.map((m) => [m.id, { status: m.status, default: m.default }]));
     if (held) this.states.set(id, states);
     return {
-      backend: held ? { id, models: held.models.map((m) => m.id) } : null,
+      backend: held
+        ? {
+            id,
+            models: held.models.map((m) => m.id),
+            ...(held.thinking ? { thinking: held.thinking } : {}),
+          }
+        : null,
       results,
       ...(note ? { note } : {}),
     };

@@ -57,6 +57,9 @@ if (args[0] === "models" && args[1] === "add" && flag("--server")) {
     id: flag("--id"),
     locality: flag("--locality") ?? "local",
     models: flags("--model"),
+    // the backend's thinking, and the longest answer each model named is held with
+    thinking: flag("--thinking"),
+    max_tokens: flag("--max-tokens"),
   };
   try {
     const offer = await k.servers.offered(input);
@@ -85,7 +88,7 @@ if (args[0] === "models" && args[1] === "add" && flag("--server")) {
         );
       if (done.backend)
         console.log(
-          `${done.backend.id} holds ${done.backend.models.join(", ")}; a Kvasir serving this database follows within seconds`,
+          `${done.backend.id} holds ${done.backend.models.join(", ")}${done.backend.thinking ? `, thinking ${done.backend.thinking}` : ""}; a Kvasir serving this database follows within seconds`,
         );
       if (done.results.some((r) => !r.answered || r.admitted === false)) process.exitCode = 1;
     }
@@ -103,14 +106,14 @@ if (args[0] === "models" && args[1] === "add" && flag("--server")) {
 // what was added and letting go what was removed.
 if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?? "")) {
   const usage =
-    "kvasir models add --server URL [--key-file FILE] [--model ID]... [--id NAME] [--locality local|remote]\nkvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON] [--pass-through chat-completions,completions,messages,responses] [--anthropic-thinking disabled|as-sent]";
+    "kvasir models add --server URL [--key-file FILE] [--model ID]... [--id NAME] [--locality local|remote] [--thinking on|off] [--max-tokens N]\nkvasir models add|test --url URL --locality local|remote --model ID [--model ID] [--kind openai-completions|anthropic-messages] [--id NAME] [--key-file FILE] [--context N] [--max-tokens N] [--reasoning] [--thinking on|off] [--upstream NAME] [--name TEXT] [--concurrency N] [--temperature T] [--inline-reasoning off|markers|open] [--compat JSON] [--pass-through chat-completions,completions,messages,responses] [--anthropic-thinking disabled|as-sent]";
   const k = build(config);
   try {
     if (args[1] === "list") {
       for (const row of k.held.rows()) {
         const c = row.config;
         console.log(
-          `${c.id}  ${c.kind}  ${c.locality}  ${c.baseUrl}  ${c.models.map((m) => m.id).join(", ")}${k.credentials.has(c.id) ? "  with a key" : ""}  added by ${row.addedBy} at ${new Date(row.addedAt).toISOString()}`,
+          `${c.id}  ${c.kind}  ${c.locality}  ${c.baseUrl}  ${c.models.map((m) => m.id).join(", ")}${c.thinking ? `  thinking ${c.thinking}` : ""}${k.credentials.has(c.id) ? "  with a key" : ""}  added by ${row.addedBy} at ${new Date(row.addedAt).toISOString()}`,
         );
       }
     } else if (args[1] === "remove") {
@@ -142,6 +145,7 @@ if (args[0] === "models" && ["list", "test", "add", "remove"].includes(args[1] ?
         inlineReasoning: flag("--inline-reasoning"),
         passThrough: flag("--pass-through"),
         anthropicThinking: flag("--anthropic-thinking"),
+        thinking: flag("--thinking"),
         compat: flag("--compat") ? JSON.parse(flag("--compat") as string) : undefined,
         defaults: flag("--temperature") ? { temperature: flag("--temperature") } : undefined,
         models: models.map((id) => ({

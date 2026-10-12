@@ -61,13 +61,25 @@ export class Backend {
     this.admission = new Admission(config.concurrency, queue, waitCapMs);
   }
 
-  /** The compatibility flags of this backend: the operator's, over the local runtime defaults. */
+  /**
+   * The compatibility flags of this backend: the operator's, over the local runtime defaults, and the
+   * backend's thinking over both. Thinking goes as the chat template's `enable_thinking`, which pi-ai
+   * sends only for a model whose entry reasons; a request never carries a thinking level of its own.
+   */
   compat(): Record<string, unknown> | undefined {
+    const openai = this.config.kind === "openai-completions";
     const local =
-      this.config.kind === "openai-completions" && this.config.locality === "local"
+      openai && this.config.locality === "local"
         ? { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" }
         : {};
-    const merged = { ...local, ...(this.config.compat ?? {}) };
+    const merged: Record<string, unknown> = { ...local, ...(this.config.compat ?? {}) };
+    if (openai && this.config.thinking) {
+      merged.thinkingFormat = "chat-template";
+      merged.chatTemplateKwargs = {
+        ...((merged.chatTemplateKwargs as Record<string, unknown> | undefined) ?? {}),
+        enable_thinking: this.config.thinking === "on",
+      };
+    }
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
