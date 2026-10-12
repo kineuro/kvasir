@@ -599,6 +599,8 @@ async function route(
         builtin: b.config.builtin === true,
         server: b.config.server === true,
         card: b.config.card ?? null,
+        // whether its models are asked to think, or turned off; null where the server's default decides
+        thinking: b.config.thinking ?? null,
         concurrency: b.config.concurrency,
         health: { ...b.health, queued: b.admission.queued },
       })),

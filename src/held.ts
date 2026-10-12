@@ -8,7 +8,14 @@
 // it started on the runtime the install runs (record 24, src/runtime.ts).
 
 import { type Backend, Backends } from "./backends.js";
-import { BACKEND_KINDS, type BackendConfig, type BackendKind, type ModelEntry } from "./config.js";
+import {
+  BACKEND_KINDS,
+  type BackendConfig,
+  type BackendKind,
+  type ModelEntry,
+  THINKINGS,
+  type Thinking,
+} from "./config.js";
 import type { Credentials } from "./credentials.js";
 import { CLASSES } from "./keys.js";
 import { HUGGING_FACE } from "./local.js";
@@ -84,6 +91,13 @@ export function throughHost(address: string, hostAlias: string | null): string {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return address;
   url.hostname = hostAlias;
   return url.toString().replace(/\/+$/u, "");
+}
+
+/** Whether a backend's models think, as a request gives it: on, off, or nothing said; anything else is refused. */
+export function thinkingOf(v: unknown): Thinking | null {
+  if (v === undefined || v === null || v === "") return null;
+  if (!THINKINGS.includes(v as Thinking)) throw new HeldRefused(400, "thinking: on or off");
+  return v as Thinking;
 }
 
 /**
@@ -163,6 +177,12 @@ export function described(
     if (typeof o.compat !== "object" || o.compat === null || Array.isArray(o.compat))
       throw bad("compat: pi-ai's compatibility flags, an object");
     config.compat = o.compat as Record<string, unknown>;
+  }
+  const thinking = thinkingOf(o.thinking);
+  if (thinking) {
+    if (kind !== "openai-completions")
+      throw bad("thinking: on or off, for a backend that speaks OpenAI's chat completions");
+    config.thinking = thinking;
   }
   const temperature = (o.defaults as { temperature?: unknown } | undefined)?.temperature;
   if (temperature !== undefined) {
