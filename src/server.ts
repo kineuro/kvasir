@@ -7,7 +7,7 @@ import { dirname, resolve } from "node:path";
 import { Admissions } from "./admission-records.js";
 import { Auth, type Grant, holds, type Principal, Refused } from "./auth.js";
 import { type Backend, Backends } from "./backends.js";
-import { type CardDriver, Cards, type CardTimes } from "./card.js";
+import { type CardDriver, Cards, type CardTimes, driverOf } from "./card.js";
 import type { CardConfig } from "./card-config.js";
 import { chatgptAuth, chatgptBackend, chatgptModels } from "./chatgpt.js";
 import { ClientRefused, Clients } from "./clients.js";
@@ -119,7 +119,13 @@ export function build(
     : null;
   local.runner = runner;
   // the cards: each model served as a backend whose admission waits for the card to load it (record 47)
-  const cards = new Cards(config.cards, backends, options.cardDriver, options.cardTimes);
+  // a card whose models sleep keeps which do beside the database, so a Kvasir started again knows them
+  const cards = new Cards(
+    config.cards,
+    backends,
+    options.cardDriver ?? ((c) => driverOf(c, dirname(config.store))),
+    options.cardTimes,
+  );
   // ChatGPT through each person's own subscription: Kvasir's own backend, served beside the added ones (record 23)
   const subscriptions = new Subscriptions(
     store,
