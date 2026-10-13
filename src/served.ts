@@ -21,6 +21,7 @@
 import { RefusedAdmission } from "./admission.js";
 import type { Backend, Backends } from "./backends.js";
 import type { ModelEntry } from "./config.js";
+import type { InlineReasoning } from "./reasoning.js";
 
 /** The doors a request passes through as the client sent it. */
 export type Protocol = "chat-completions" | "completions" | "messages" | "responses";
@@ -88,6 +89,8 @@ export interface ServedModel {
   protocols: Protocol[];
   /** An Anthropic request without `thinking`: sent on as disabled, or left to the model. */
   anthropicThinking: "disabled" | "as-sent";
+  /** How its text is read for reasoning it left inline: the model's own setting, else its backend's, else markers. */
+  inlineReasoning: InlineReasoning;
   /** Whether it runs in the group's own systems: only such a model is reached through a pass-through door (D44). */
   local: boolean;
   /** Everything else, spread into the model's object as modelgate spreads its spec. */
@@ -287,6 +290,11 @@ export function modelList(c: ServedCatalog, keep?: (m: ServedModel) => boolean):
   };
 }
 
+/** How a model's text is read for reasoning it left inline (record 55, B6): the model's own setting, else its backend's, else markers. */
+export function inlineOf(backend: Backend, entry: ModelEntry): InlineReasoning {
+  return entry.inlineReasoning ?? backend.config.inlineReasoning ?? "markers";
+}
+
 /** A backend's pass-through doors: what its configuration says, or none. */
 export function protocolsOf(backend: Backend): Protocol[] {
   return backend.config.passThrough ?? [];
@@ -325,6 +333,7 @@ export function servedOf(backend: Backend, entry: ModelEntry, source?: StatusSou
     vision: entry.input.includes("image"),
     protocols: protocolsOf(backend),
     anthropicThinking: backend.config.anthropicThinking ?? "disabled",
+    inlineReasoning: inlineOf(backend, entry),
     local: backend.config.locality === "local",
     spec: spec.rest,
   };

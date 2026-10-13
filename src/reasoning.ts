@@ -2,7 +2,8 @@
 // Reasoning a model leaves in its text (the chat, slice 9). A runtime that does
 // not separate a model's reasoning streams it inline, between markers that differ
 // by family: <think>…</think> (Qwen, DeepSeek, GLM, Kimi K2, MiniMax M2, Phi-4,
-// Nemotron, OLMo, ERNIE), Gemma 4's <|channel>thought … <channel|>, gpt-oss's
+// Nemotron, OLMo, ERNIE), <thinking>…</thinking> (the Anthropic-style tag a model
+// writes as text, as Qwen 3.8 27B did after a swap), Gemma 4's <|channel>thought … <channel|>, gpt-oss's
 // harmony channels, Mistral's [THINK] … [/THINK], Cohere's <|START_THINKING|>
 // … <|END_THINKING|>, Kimi K3's <|open|>think<|sep|> …, and the namespaced
 // <seed:think>, <mm:think> and <think:name>. The splitter reads the text as it
@@ -14,8 +15,12 @@
 // reasoning. It holds back the end of the text while that could still become a
 // marker, and drops the stop tokens a runtime leaves at the end.
 //
-// Kept the same in kvasir (src/reasoning.ts), nils-assistant (src/host/reasoning.ts)
-// and nils-desk (web/src/assistant/reasoning.ts).
+// One shared module. Its home is kvasir (src/reasoning.ts); nils-assistant
+// (src/host/reasoning.ts) and nils-desk (web/src/assistant/reasoning.ts) carry it
+// unchanged. It is changed only in kvasir, where `node scripts/share-reasoning.mjs`
+// stamps it and copies it; each repository's tests check the stamp below, the
+// sha256 of this file without that line, so a copy edited in place fails.
+// shared-sha256: 6bd452e7c1cf674804a3c915f9731cc60264a563968a7c2b8eeedf367973eca6
 
 export type Segment = { kind: "thinking" | "text"; text: string };
 
@@ -35,6 +40,7 @@ const PAIRS: Pair[] = [
   pair("<mm:think>", "</mm:think>"),
   pair("[THINK]", "[/THINK]"),
   pair("<think>", "</think>", "<answer>", "<response>"),
+  pair("<thinking>", "</thinking>", "<answer>", "<response>"),
 ];
 
 /** A think tag with a name, as <think:opensource>. */
@@ -71,7 +77,7 @@ const HARMONY_BREAKS = ["<|end|>", "<|return|>", "<|call|>", "<|start|>", "<|cha
 
 /** A closing marker that ends reasoning a prompt opened, when no marker opened the text. */
 const LONE_CLOSE =
-  /<\/think>|<\/seed:think>|<\/mm:think>|<\/think:[A-Za-z0-9_-]{1,32}>|\[\/THINK\]|<channel\|>|<\|END_THINKING\|>|<\|close\|>think<\|sep\|>/u;
+  /<\/think>|<\/thinking>|<\/seed:think>|<\/mm:think>|<\/think:[A-Za-z0-9_-]{1,32}>|\[\/THINK\]|<channel\|>|<\|END_THINKING\|>|<\|close\|>think<\|sep\|>/u;
 
 function earliest(
   text: string,

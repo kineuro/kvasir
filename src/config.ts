@@ -40,6 +40,12 @@ export interface ModelEntry {
    * the listing (src/served.ts).
    */
   spec?: Record<string, unknown>;
+  /**
+   * How this model's text is read for reasoning it left inline (record 55, B6),
+   * over its backend's `inlineReasoning`: a card's models share one backend kind
+   * but not one chat template, so the setting belongs to the model.
+   */
+  inlineReasoning?: import("./reasoning.js").InlineReasoning;
 }
 
 export interface BackendConfig {
@@ -83,7 +89,8 @@ export interface BackendConfig {
    * How this backend's text is read for reasoning a model left inline (the chat,
    * slice 9): "markers", the default, reads it from markers that open the output;
    * "open" from the start of the output to a closing marker, for a chat template
-   * that opens thinking in the prompt; "off" not at all.
+   * that opens thinking in the prompt; "off" not at all. A model's own
+   * `inlineReasoning` comes first; this is the default for its models.
    */
   inlineReasoning?: import("./reasoning.js").InlineReasoning;
   /** Kvasir's own backend, never added, stored or removed: ChatGPT through each person's own subscription (record 23). */

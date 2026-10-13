@@ -5,6 +5,7 @@
 // container, upstream, default, spec), so its configuration moves over whole.
 
 import { isAbsolute } from "node:path";
+import type { InlineReasoning } from "./reasoning.js";
 import { specOf } from "./served.js";
 
 /** One model of a card. */
@@ -21,6 +22,11 @@ export interface CardMemberConfig {
   backend: string;
   /** The model's specs, as modelgate's `spec` (context_length, max_output_tokens, max_concurrent_requests, capabilities, and the rest). */
   spec: Record<string, unknown>;
+  /**
+   * How the model's text is read for reasoning it left inline (record 55, B6): `markers`, `open` for a chat
+   * template that opens thinking in the prompt, or `off`. The card's `inlineReasoning` where it sets none.
+   */
+  inlineReasoning?: InlineReasoning;
 }
 
 export type CardDriverConfig =
@@ -49,7 +55,18 @@ export interface CardConfig {
    * `disabled`, the default, sends it on as thinking disabled; `as-sent` leaves it to the model.
    */
   anthropicThinking: "disabled" | "as-sent";
+  /** How its models' text is read for reasoning left inline, where a model sets none; `markers` where the card sets none either. */
+  inlineReasoning?: InlineReasoning;
   models: CardMemberConfig[];
+}
+
+const INLINE: InlineReasoning[] = ["off", "markers", "open"];
+
+/** An `inlineReasoning` setting, checked; none where it is not given. */
+function inlineSetting(v: unknown, where: string, bad: (m: string) => Error): InlineReasoning | undefined {
+  if (v === undefined) return undefined;
+  if (!INLINE.includes(v as InlineReasoning)) throw bad(`${where}: inlineReasoning is off, markers or open`);
+  return v as InlineReasoning;
 }
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/u;
@@ -135,6 +152,7 @@ export function cardsOf(value: unknown, runtime: { url: string } | null): CardCo
       backends.add(backend);
       const spec = m.spec && typeof m.spec === "object" && !Array.isArray(m.spec) ? m.spec : {};
       if (specOf(spec).contextLength === null) throw bad(`${mid}: spec.context_length, in tokens`);
+      const inline = inlineSetting(m.inlineReasoning, mid, bad);
       models.push({
         id: mid,
         aliases,
@@ -143,11 +161,13 @@ export function cardsOf(value: unknown, runtime: { url: string } | null): CardCo
         default: m.default === true,
         backend,
         spec: spec as Record<string, unknown>,
+        ...(inline ? { inlineReasoning: inline } : {}),
       });
     }
     const defaults = models.filter((m) => m.default);
     if (defaults.length > 1) throw bad(`${id}: one default model, not ${defaults.length}`);
     if (defaults.length === 0) models[0].default = true;
+    const inline = inlineSetting(c.inlineReasoning, id, bad);
     const thinking = c.anthropicThinking ?? "disabled";
     if (thinking !== "disabled" && thinking !== "as-sent")
       throw bad(`${id}: anthropicThinking is disabled or as-sent`);
@@ -162,6 +182,7 @@ export function cardsOf(value: unknown, runtime: { url: string } | null): CardCo
       queueTimeoutSeconds: seconds("queueTimeoutSeconds", 1500),
       note: typeof c.note === "string" ? c.note : "",
       anthropicThinking: thinking,
+      ...(inline ? { inlineReasoning: inline } : {}),
       models,
     });
   }

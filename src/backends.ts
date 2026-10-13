@@ -139,7 +139,7 @@ export class Backend {
             ? codexStream(model as Model<"openai-codex-responses">, context, common)
             : openaiStream(model as Model<"openai-completions">, context, common);
       // reasoning a model left inline leaves as thinking, never as the answer (the chat, slice 9)
-      const mode = this.config.inlineReasoning ?? "markers";
+      const mode = entry.inlineReasoning ?? this.config.inlineReasoning ?? "markers";
       for await (const ev of mode === "off" ? events : splitInline(events, mode)) {
         if (
           (this.health.warming || this.health.firstTokenAt === null) &&
