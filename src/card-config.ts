@@ -29,8 +29,18 @@ export interface CardMemberConfig {
   inlineReasoning?: InlineReasoning;
 }
 
+/**
+ * How a model that leaves a Docker card sleeps (record 55, B6): `stop`, its container stopped, so it comes
+ * back by a cold start of minutes (the default); or `release`, its SGLang server asked to release its GPU
+ * memory with its weights kept in the host's memory (`/release_memory_occupation`), and to take it back
+ * when it is asked for again (`/resume_memory_occupation`), a warm swap of seconds. `release` needs every
+ * container of the card started with `--enable-memory-saver --enable-weights-cpu-backup`, and a server
+ * image whose memory saver survives a release on the card's models.
+ */
+export type CardSleep = "stop" | "release";
+
 export type CardDriverConfig =
-  | { kind: "docker"; command: string }
+  | { kind: "docker"; command: string; sleep: CardSleep }
   | { kind: "llama-router"; url: string; keyFile: string };
 
 export interface CardConfig {
@@ -98,8 +108,18 @@ export function cardsOf(value: unknown, runtime: { url: string } | null): CardCo
     const kind = c.driver ?? "docker";
     let driver: CardDriverConfig;
     if (kind === "docker") {
-      driver = { kind: "docker", command: typeof c.docker === "string" && c.docker ? c.docker : "docker" };
+      const sleep = c.sleep ?? "stop";
+      if (sleep !== "stop" && sleep !== "release") throw bad(`${id}: sleep is stop or release`);
+      driver = {
+        kind: "docker",
+        command: typeof c.docker === "string" && c.docker ? c.docker : "docker",
+        sleep,
+      };
     } else if (kind === "llama-router") {
+      if (c.sleep !== undefined && c.sleep !== "stop")
+        throw bad(
+          `${id}: sleep: release is for SGLang containers (driver docker); a router unloads its presets`,
+        );
       const r = (c.router ?? {}) as Record<string, unknown>;
       const url = typeof r.url === "string" ? r.url.trim().replace(/\/+$/u, "") : "";
       if (!/^https?:\/\/[^\s/]+$/u.test(url)) throw bad(`${id}: router.url is the router's address`);

@@ -17,6 +17,8 @@
 // its warming page (kineuro/kvasir#8).
 
 import { execFile } from "node:child_process";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { RefusedAdmission } from "./admission.js";
 import type { Backend, Backends } from "./backends.js";
 import type { CardConfig, CardMemberConfig } from "./card-config.js";
@@ -25,6 +27,8 @@ import { LlamaRouter } from "./runtime.js";
 import { PROTOCOLS, type ServedServer, type ServedStatus, specOf } from "./served.js";
 
 export type { CardConfig, CardMemberConfig } from "./card-config.js";
+
+const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** What starts, stops and asks after the models of a card. */
 export interface CardDriver {
@@ -37,6 +41,8 @@ export interface CardDriver {
   stop(m: CardMemberConfig): Promise<void>;
   /** Whether the model answers its health now. */
   healthy(m: CardMemberConfig): Promise<boolean>;
+  /** Whether the model's process runs asleep, its GPU memory released (a driver that never sleeps leaves this out). */
+  asleep?(m: CardMemberConfig): boolean;
 }
 
 /** A command's exit status and what it wrote. */
@@ -94,6 +100,168 @@ export class DockerDriver implements CardDriver {
   }
 }
 
+/** A POST with an empty JSON body to a model's own server: its status, 0 where it did not answer. */
+export type Post = (url: string, timeoutMs: number) => Promise<{ status: number; body: string }>;
+
+export const postEmpty: Post = async (url, timeoutMs) => {
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { status: r.status, body: (await r.text()).slice(0, 300) };
+  } catch (e) {
+    return { status: 0, body: messageOf(e) };
+  }
+};
+
+/** How long a release or a resume may take, and how long a woken model has to answer its health. */
+export interface SleepTimes {
+  /** A release or a resume moves the weights between the card and the host's memory: up to minutes on a large model. */
+  callMs: number;
+  /** How long a server is watched after its release, for the exit that a crashing memory saver ends in. */
+  settleMs: number;
+  /** How long a woken model has to answer its health before it is started again cold. */
+  wakeMs: number;
+  pollMs: number;
+}
+
+export const SLEEP_TIMES: SleepTimes = { callMs: 600_000, settleMs: 5_000, wakeMs: 120_000, pollMs: 1_000 };
+
+/**
+ * SGLang containers whose model sleeps when it leaves the card (record 55, B6; the card's `sleep: release`):
+ * its server releases its GPU memory and keeps its weights in the host's memory, and resumes them when it is
+ * asked for again, a warm swap of seconds instead of a cold start of minutes. The containers run
+ * `--enable-memory-saver --enable-weights-cpu-backup`.
+ *
+ * A memory saver that crashes its server, as SGLang 0.5.20 and 0.5.21 do on hybrid models whose state pools
+ * are cleared after the release has unmapped them (CUDA error 700), costs a cold swap, never a failed
+ * request: a release that does not answer, or whose server then exits, stops the container as the `stop`
+ * mode does, and a woken model that does not answer its health in time is started again cold. Which models
+ * sleep is kept in a file beside Kvasir's database, so a Kvasir started again wakes a sleeping model rather
+ * than asking a sleeping server for its health.
+ */
+export class ReleasingDockerDriver extends DockerDriver {
+  private readonly sleeping = new Set<string>();
+  /** What happens, a line each. */
+  say: (line: string) => void = () => {};
+
+  constructor(
+    private readonly run: Exec = dockerExec(),
+    probe: (url: string) => Promise<boolean> = healthAnswers,
+    private readonly post: Post = postEmpty,
+    /** Where the names of the sleeping containers are kept; none keeps them in memory only. */
+    private readonly stateFile: string | null = null,
+    private readonly times: SleepTimes = SLEEP_TIMES,
+    private readonly restartSeconds = 30,
+  ) {
+    super(run, probe, restartSeconds);
+    if (stateFile && existsSync(stateFile)) {
+      try {
+        const names = JSON.parse(readFileSync(stateFile, "utf8")).sleeping;
+        if (Array.isArray(names)) for (const n of names) if (typeof n === "string") this.sleeping.add(n);
+      } catch {
+        // a file that cannot be read knows no sleeping model: each is asked as if awake
+      }
+    }
+  }
+
+  private keep(): void {
+    if (!this.stateFile) return;
+    const tmp = `${this.stateFile}.new`;
+    writeFileSync(tmp, `${JSON.stringify({ sleeping: [...this.sleeping].sort() })}\n`);
+    renameSync(tmp, this.stateFile);
+  }
+
+  private mark(m: CardMemberConfig, asleep: boolean): void {
+    if (asleep === this.sleeping.has(m.name)) return;
+    if (asleep) this.sleeping.add(m.name);
+    else this.sleeping.delete(m.name);
+    this.keep();
+  }
+
+  asleep(m: CardMemberConfig): boolean {
+    return this.sleeping.has(m.name);
+  }
+
+  override async healthy(m: CardMemberConfig): Promise<boolean> {
+    // a sleeping server is never asked: its health is a generation, and its memory is not there
+    return !this.sleeping.has(m.name) && (await super.healthy(m));
+  }
+
+  private wait(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /** Whether the container still runs `ms` after a release: a crashing memory saver ends its server. */
+  private async survives(m: CardMemberConfig, ms: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    for (;;) {
+      if (!(await this.running(m))) return false;
+      if (Date.now() >= end) return true;
+      await this.wait(Math.min(this.times.pollMs, Math.max(1, end - Date.now())));
+    }
+  }
+
+  /** Whether a woken model answers its health in time, its container running throughout. */
+  private async answers(m: CardMemberConfig): Promise<boolean> {
+    const end = Date.now() + this.times.wakeMs;
+    while (Date.now() < end) {
+      if (!(await this.running(m))) return false;
+      if (await super.healthy(m)) return true;
+      await this.wait(this.times.pollMs);
+    }
+    return false;
+  }
+
+  /** The model to sleep: its server releases its GPU memory, or, where that fails, its container is stopped. */
+  override async stop(m: CardMemberConfig): Promise<void> {
+    if (!(await this.running(m))) {
+      this.mark(m, false);
+      return;
+    }
+    if (this.sleeping.has(m.name)) return;
+    const r = await this.post(`${m.upstream}/release_memory_occupation`, this.times.callMs);
+    if (r.status === 200 && (await this.survives(m, this.times.settleMs))) {
+      this.mark(m, true);
+      this.say(`${m.name} sleeps: its GPU memory released, its weights in the host's memory`);
+      return;
+    }
+    const why =
+      r.status === 200
+        ? "its server exited after the release"
+        : `the release answered ${r.status || "nothing"}${r.body ? ` (${r.body.slice(0, 120)})` : ""}`;
+    this.say(`${m.name}: ${why}; its container is stopped instead, and it starts cold`);
+    this.mark(m, false);
+    await super.stop(m);
+  }
+
+  /** The model to wake: a sleeping server resumes, a stopped container starts; one that does not answer starts again cold. */
+  override async start(m: CardMemberConfig): Promise<void> {
+    if (!(await this.running(m))) {
+      this.mark(m, false);
+      await super.start(m);
+      return;
+    }
+    if (!this.sleeping.has(m.name)) return;
+    const r = await this.post(`${m.upstream}/resume_memory_occupation`, this.times.callMs);
+    this.mark(m, false);
+    if (r.status === 200 && (await this.answers(m))) {
+      this.say(`${m.name} woke: its weights back on the card`);
+      return;
+    }
+    const why =
+      r.status === 200
+        ? `it did not answer its health within ${Math.round(this.times.wakeMs / 1000)} s of waking`
+        : `the resume answered ${r.status || "nothing"}${r.body ? ` (${r.body.slice(0, 120)})` : ""}`;
+    this.say(`${m.name}: ${why}; it starts again cold`);
+    const again = await this.run(["restart", "-t", String(this.restartSeconds), m.name]);
+    if (again.code !== 0) throw new Error(`docker restart ${m.name}: ${again.out.slice(-300)}`);
+  }
+}
+
 /** llama.cpp's server in router mode (record 24): a card's model is a preset it loads and unloads. */
 export class LlamaRouterDriver implements CardDriver {
   readonly kind = "llama-router";
@@ -147,8 +315,6 @@ export function timesOf(c: CardConfig): CardTimes {
     idleCheckMs: 15_000,
   };
 }
-
-const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** One card: its models, which is loaded, and the swap between them. */
 export class Card {
@@ -275,13 +441,17 @@ export class Card {
   async adopt(): Promise<void> {
     const up: string[] = [];
     for (const [id, m] of this.members) if (await this.driver.running(m).catch(() => false)) up.push(id);
+    // a sleeping model runs but holds no memory: an awake one is kept before it, so a start costs no swap
+    const awake = up.filter((id) => this.driver.asleep?.(this.member(id)) !== true);
     if (!this.config.manage) {
       await this.look();
       this.timers.push(setInterval(() => void this.look(), this.times.pollMs));
       for (const t of this.timers) t.unref?.();
       return;
     }
-    const keep = up.includes(this.default) ? this.default : (up[0] ?? this.default);
+    const keep = awake.includes(this.default)
+      ? this.default
+      : (awake[0] ?? (up.includes(this.default) ? this.default : (up[0] ?? this.default)));
     for (const id of up) if (id !== keep) await this.takeDown(id);
     this.target = keep;
     this.notify();
@@ -550,8 +720,8 @@ export function memberBackend(card: CardConfig, m: CardMemberConfig): BackendCon
   };
 }
 
-/** The driver a card's configuration names. */
-export function driverOf(c: CardConfig): CardDriver {
+/** The driver a card's configuration names; `stateDir` keeps which models sleep, where a card lets them. */
+export function driverOf(c: CardConfig, stateDir: string | null = null): CardDriver {
   if (c.driver.kind === "llama-router")
     return new LlamaRouterDriver(
       new LlamaRouter({
@@ -562,6 +732,13 @@ export function driverOf(c: CardConfig): CardDriver {
         build: "",
         variant: "",
       }),
+    );
+  if (c.driver.sleep === "release")
+    return new ReleasingDockerDriver(
+      dockerExec(c.driver.command),
+      healthAnswers,
+      postEmpty,
+      stateDir ? join(stateDir, `kvasir-sleep-${c.id}.json`) : null,
     );
   return new DockerDriver(dockerExec(c.driver.command));
 }
@@ -647,7 +824,10 @@ export class Cards {
   }
 
   async start(say: (line: string) => void = () => {}): Promise<void> {
-    for (const c of this.list) c.say = say;
+    for (const c of this.list) {
+      c.say = say;
+      if (c.driver instanceof ReleasingDockerDriver) c.driver.say = (line) => say(`${c.id}: ${line}`);
+    }
     await Promise.all(this.list.map((c) => c.start()));
   }
 

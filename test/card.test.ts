@@ -408,7 +408,7 @@ describe("the card", () => {
     const config = parse(readFileSync(new URL("../kvasir.card.example.json", import.meta.url), "utf8"));
     expect(config.cards).toHaveLength(1);
     const [card] = config.cards;
-    expect(card.driver).toEqual({ kind: "docker", command: "docker" });
+    expect(card.driver).toEqual({ kind: "docker", command: "docker", sleep: "stop" });
     expect(card.models.map((m) => [m.id, m.name, m.backend, m.default])).toEqual([
       ["qwen3.8-flash-next", "sgl-next", "card0-qwen3-8-flash-next", true],
       ["qwen38-27b", "sgl-27b", "card0-qwen38-27b", false],
