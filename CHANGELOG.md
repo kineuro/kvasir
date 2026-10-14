@@ -4,6 +4,8 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.10] - 2026-10-14
+
 ### Added
 
 - A card whose models sleep (record 55, B6): a Docker card with `"sleep": "release"` swaps warm. The model that leaves the card is asked to release its GPU memory with its weights kept in the host's memory (`POST /release_memory_occupation` on its SGLang server, whose containers run `--enable-memory-saver --enable-weights-cpu-backup`), and to resume them when it is asked for again (`/resume_memory_occupation`), so a swap takes seconds, not a cold start of minutes. The sleep-and-wake fault never reaches a request: a release that does not answer, or whose server exits after it (SGLang 0.5.20 and 0.5.21 crash there on hybrid models, CUDA error 700, because they clear the state pools after the release has unmapped them), stops the container instead, and a woken model that does not answer its health within two minutes is started again cold, so a fault costs the old swap's minutes and nothing else. A sleeping server is never asked for its health, which is a generation on SGLang. Which models sleep is kept beside the database (`kvasir-sleep-<card>.json`), so a Kvasir started again knows them, and at start the card keeps an awake model before a sleeping default. `"sleep": "stop"`, the default, swaps cold as before; a llama.cpp router's card takes only `stop`. `scripts/check-sleep-image.sh IMAGE [docker|podman]` says whether a server image allows `release`: it runs SGLang's own test of the flush order (sgl-project/sglang#40821, on its sglang-miles branch) inside the image, on the CPU with no network; it fails on 0.5.21, the latest release, and passes on 0.5.21 with that fix applied.
