@@ -170,6 +170,12 @@ export interface Config {
   clients: { ledgerDays: number };
   /** The cards Kvasir serves (record 47): groups of models sharing one device, one loaded at a time. */
   cards: import("./card-config.js").CardConfig[];
+  /**
+   * The longest answer each backend's models are held to, by the backend's id: a site's own limit over
+   * what the catalog says, so a model whose server allows 65,536 tokens answers at most this many, and a
+   * call that names no longest answer is held to it. A backend not named keeps its catalog's.
+   */
+  maxTokens: Record<string, number>;
 }
 
 /**
@@ -196,6 +202,7 @@ export function parse(text: string): Config {
     hostAlias?: unknown;
     public?: unknown;
     clients?: unknown;
+    maxTokens?: unknown;
   };
   if (!raw.bind || !raw.origin) throw new Error("kvasir.json: bind and origin");
   if (raw.backends !== undefined)
@@ -223,7 +230,20 @@ export function parse(text: string): Config {
     public: publicOf(raw.public),
     clients: clientsOf(raw.clients),
     cards: cardsOf(raw.cards, local.runtime),
+    maxTokens: maxTokensOf(raw.maxTokens),
   };
+}
+
+/** The longest answer each backend named is held to: a whole number of tokens by backend id. */
+function maxTokensOf(value: unknown): Config["maxTokens"] {
+  if (value === undefined || value === null) return {};
+  const said =
+    "kvasir.json: maxTokens is the longest answer each backend's models are held to, by the backend's id, such as { \"gpu-card\": 16384 }";
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error(said);
+  const entries = Object.entries(value);
+  for (const [id, n] of entries)
+    if (!id || typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 1 << 20) throw new Error(said);
+  return Object.fromEntries(entries) as Record<string, number>;
 }
 
 /** The public doors and their listener (record 47). */

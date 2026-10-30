@@ -90,7 +90,7 @@ export function build(
   } = {},
 ): Kvasir {
   const store = new Store(config.store);
-  const backends = new Backends(config.admission);
+  const backends = new Backends(config.admission, config.maxTokens);
   const keys = new Keys(store, pepper(config.pepperFile));
   const clients = new Clients(store);
   const ledger = new Ledger(store);

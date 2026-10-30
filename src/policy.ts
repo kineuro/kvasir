@@ -388,11 +388,12 @@ export class Policy {
         relaxation: `ask for at most ${entry.contextWindow} context tokens`,
       });
     }
-    if (need.max_output_tokens && need.max_output_tokens > entry.maxTokens) {
+    const longest = chosen.longest(entry);
+    if (need.max_output_tokens && need.max_output_tokens > longest) {
       refusals.push({
         layer: "requirement",
-        fact: `${entry.id} answers at most ${entry.maxTokens} tokens, and ${need.max_output_tokens} were asked`,
-        relaxation: `ask for at most ${entry.maxTokens} output tokens`,
+        fact: `${entry.id} answers at most ${longest} tokens, and ${need.max_output_tokens} were asked`,
+        relaxation: `ask for at most ${longest} output tokens`,
       });
     }
     if (need.reasoning && need.reasoning !== "off" && !entry.reasoning) {
@@ -422,7 +423,7 @@ export class Policy {
       model: entry.id,
       backend: chosen.config.id,
       locality: chosen.config.locality,
-      limits: { context_tokens: entry.contextWindow, max_output_tokens: entry.maxTokens },
+      limits: { context_tokens: entry.contextWindow, max_output_tokens: longest },
       capabilities: {
         tools: true,
         structured: "strict",

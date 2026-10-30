@@ -28,6 +28,38 @@ export async function readBody(req: IncomingMessage, limit = 32 << 20): Promise<
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/**
+ * The bytes of text one token stands for at most, in the estimate of a prompt's tokens. A real tokenizer
+ * gives three to five bytes of prose or code a token, so the estimate is below the true count.
+ */
+export const BYTES_PER_TOKEN = 6;
+
+/** A rough, low count of the tokens of a request's text, never its images. */
+export function estimateTokens(v: unknown): number {
+  let bytes = 0;
+  const walk = (x: unknown, key: string | null): void => {
+    if (typeof x === "string") {
+      // an image travels as base64 in `data` or as a data URL; it is not text
+      if (key === "data" || x.startsWith("data:")) return;
+      bytes += Buffer.byteLength(x, "utf8");
+    } else if (Array.isArray(x)) for (const y of x) walk(y, key);
+    else if (x && typeof x === "object") for (const [k, y] of Object.entries(x)) walk(y, k);
+  };
+  walk(v, null);
+  return Math.floor(bytes / BYTES_PER_TOKEN);
+}
+
+/**
+ * The longest answer of a call that named none (C1): the model's longest, so no call runs until the
+ * context is full, and less where the prompt leaves less room than that, so the default never makes the
+ * backend refuse a prompt it would have taken. `input` is a low estimate of the prompt's tokens, so the
+ * room is reckoned on twice it, and on the estimate itself where twice it does not fit.
+ */
+export function answerFor(longest: number, context: number, input: number): number {
+  const room = context - 2 * input;
+  return Math.max(1, Math.min(longest, room >= 1 ? room : context - input));
+}
+
 /** How long a stream may say nothing before Kvasir writes a comment on it. */
 export const KEEP_ALIVE_MS = 15_000;
 
@@ -142,6 +174,25 @@ export function toPiMessagesEvent(ev: AssistantMessageEvent): Record<string, unk
 }
 
 type Found = NonNullable<ReturnType<Backends["find"]>>;
+
+/**
+ * An abort for the call the response answers, fired when the client goes away before the answer is done:
+ * its connection closed with the response not finished. The upstream request is aborted with it, so a
+ * model stops generating for a client that left (C1). A request's own `close` is no sign of that: Node
+ * emits it once the body has been read.
+ */
+export function goneWith(res: ServerResponse): AbortController {
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  return controller;
+}
+
+/** The deltas of a stream, counted as it passes: the tokens it gave so far, where no usage came before it ended. */
+function isDelta(ev: AssistantMessageEvent): boolean {
+  return ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta";
+}
 
 /**
  * Whose stream a call is: the subject its ledger row names, a person's, the
@@ -301,8 +352,7 @@ export async function piMessages(
     return;
   }
   const { found, granted, purpose } = decision;
-  const controller = new AbortController();
-  req.on("close", () => controller.abort());
+  const controller = goneWith(res);
   const started = Date.now();
   // the queue (§8.7): the headers go out now; a heartbeat keeps the socket while waiting, and a
   // comment keeps it while the model says nothing
@@ -325,7 +375,7 @@ export async function piMessages(
     res.end();
     ledger.record(
       row(subject, found, {
-        outcome: "refused",
+        outcome: controller.signal.aborted ? "gone" : "refused",
         refusal,
         totalMs: Date.now() - started,
         purpose: granted?.purpose ?? purpose,
@@ -338,20 +388,22 @@ export async function piMessages(
   let ttftMs: number | null = null;
   let outcome: Row["outcome"] = "completed";
   let usage: Partial<Row> | null = null;
+  let deltas = 0;
+  let answered = false;
   try {
     for await (const ev of found.backend.stream(found.entry, asBackendTurns(body.context, found), {
       temperature: typeof o.temperature === "number" ? o.temperature : undefined,
-      maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : undefined,
+      // the call's longest answer, held to the entry's (C1)
+      maxTokens: found.backend.answerFor(found.entry, o.maxTokens, estimateTokens(body.context)),
       signal: controller.signal,
       subject: subscriber ?? undefined,
     })) {
-      if (
-        ttftMs === null &&
-        (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta")
-      ) {
-        ttftMs = Date.now() - started;
+      if (isDelta(ev)) {
+        deltas += 1;
+        if (ttftMs === null) ttftMs = Date.now() - started;
       }
       if (ev.type === "done") {
+        answered = true;
         usage = counts(ev.message.usage);
         if (ev.reason === "length") outcome = "capped";
       }
@@ -372,6 +424,10 @@ export async function piMessages(
   alive.stop();
   res.end();
   const totalMs = Date.now() - started;
+  if (controller.signal.aborted && !answered) {
+    outcome = "gone";
+    usage = soFar(usage, deltas);
+  }
   ledger.record(
     row(subject, found, {
       ...(usage ?? {}),
@@ -430,6 +486,14 @@ function counts(
     cacheWrite: u.cacheWrite,
     money: u.cost?.total ?? 0,
   };
+}
+
+/**
+ * The counts of a call the client left (C1): the usage the backend sent, and where it sent none of the
+ * answer's, the deltas streamed so far, one token each, as an OpenAI-shaped server streams them.
+ */
+function soFar(usage: Partial<Row> | null, deltas: number): Partial<Row> {
+  return { ...(usage ?? {}), output: usage?.output || deltas };
 }
 
 function row(
@@ -492,6 +556,7 @@ export async function chatCompletions(
     stream?: boolean;
     temperature?: number;
     max_tokens?: number;
+    max_completion_tokens?: number;
   };
   try {
     body = JSON.parse(opts.body ?? (await readBody(req)));
@@ -563,8 +628,7 @@ export async function chatCompletions(
     );
   const id = `chatcmpl-${Date.now().toString(36)}`;
   const created = Math.floor(Date.now() / 1000);
-  const controller = new AbortController();
-  req.on("close", () => controller.abort());
+  const controller = goneWith(res);
   const started = Date.now();
   const stream = body.stream === true;
   // the queue (§8.7): a stream's headers go out now and a heartbeat keeps the socket while it waits,
@@ -599,12 +663,18 @@ export async function chatCompletions(
     } else {
       json(res, 503, { error: { message, type: "refused", code: "refused", layer: refusal.layer } });
     }
-    ledgerRow({ outcome: "refused", refusal, totalMs: Date.now() - started });
+    ledgerRow({
+      outcome: controller.signal.aborted ? "gone" : "refused",
+      refusal,
+      totalMs: Date.now() - started,
+    });
     return;
   }
   let ttftMs: number | null = null;
   let outcome: Row["outcome"] = "completed";
   let counted: Partial<Row> | null = null;
+  let deltas = 0;
+  let answered = false;
   let text = "";
   let reasoning = "";
   let finish = "stop";
@@ -613,15 +683,18 @@ export async function chatCompletions(
     if (stream) chunk({ role: "assistant", content: "" });
     for await (const ev of found.backend.stream(found.entry, context, {
       temperature: body.temperature,
-      maxTokens: body.max_tokens,
+      // the call's longest answer, held to the entry's (C1); OpenAI's newer name counts as the older
+      maxTokens: found.backend.answerFor(
+        found.entry,
+        body.max_tokens ?? body.max_completion_tokens,
+        estimateTokens(context),
+      ),
       signal: controller.signal,
       subject: subscriber ?? undefined,
     })) {
-      if (
-        ttftMs === null &&
-        (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta")
-      ) {
-        ttftMs = Date.now() - started;
+      if (isDelta(ev)) {
+        deltas += 1;
+        if (ttftMs === null) ttftMs = Date.now() - started;
       }
       if (ev.type === "text_delta") {
         text += ev.delta;
@@ -630,6 +703,7 @@ export async function chatCompletions(
         reasoning += ev.delta;
         if (stream) chunk({ reasoning_content: ev.delta });
       } else if (ev.type === "done") {
+        answered = true;
         counted = counts(ev.message.usage);
         tokens = {
           input: ev.message.usage.input,
@@ -652,6 +726,10 @@ export async function chatCompletions(
     release();
   }
   const totalMs = Date.now() - started;
+  if (controller.signal.aborted && !answered) {
+    outcome = "gone";
+    counted = soFar(counted, deltas);
+  }
   ledgerRow({
     ...(counted ?? {}),
     outcome,

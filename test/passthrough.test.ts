@@ -484,14 +484,22 @@ describe("modelgate's smoke test against Kvasir", () => {
   });
 
   it("refuses a request that cannot fit the model's context before the backend is asked", async () => {
-    const before = seen.length;
+    // a longest answer past the model's is held to the model's (C1), so it fits
     const over = await post(url, "/v1/chat/completions", bearer(NIMA), {
       model: "dense",
       max_tokens: 40_000,
       messages: [{ role: "user", content: "Hi" }],
     });
-    expect(over.status).toBe(400);
-    const e = await over.json();
+    expect(over.status).toBe(200);
+    expect(last().body.max_tokens).toBe(8_192);
+    const before = seen.length;
+    const huge = await post(url, "/v1/chat/completions", bearer(NIMA), {
+      model: "dense",
+      max_tokens: 8_000,
+      messages: [{ role: "user", content: "word ".repeat(40_000) }],
+    });
+    expect(huge.status).toBe(400);
+    const e = await huge.json();
     expect(e.error.code).toBe("context_length_exceeded");
     expect(e.error.message).toContain("32768");
     const long = await post(
