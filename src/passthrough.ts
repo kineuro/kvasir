@@ -2,10 +2,12 @@
 // The doors as the client sent them (record 47, K1, R2): OpenAI's chat and
 // completions, Anthropic's messages and count_tokens, and OpenAI's responses,
 // forwarded to a backend that speaks the same protocol natively (SGLang speaks
-// all of them). Kvasir changes two things in a request and nothing else: the
-// model's name, to the one its backend serves it by, and on Anthropic's
-// messages the thinking default (a request without `thinking` goes on as
-// thinking disabled, as Anthropic's own API behaves). Tools, images, stop
+// all of them). Kvasir changes three things in a request and nothing else: the
+// model's name, to the one its backend serves it by; on Anthropic's messages
+// the thinking default (a request without `thinking` goes on as thinking
+// disabled, as Anthropic's own API behaves); and the longest answer (C1), which
+// a request that names none is given as its model's, and a request that names
+// more is held to, so no call runs until the context is full. Tools, images, stop
 // sequences, response formats and every other field go as they came, and the
 // answer comes back as the backend wrote it, event for event, but for one
 // thing: reasoning the model left inline in its text is read apart from the
@@ -15,7 +17,8 @@
 // Around that: the key's scopes, the context guard (a request whose input and
 // longest answer cannot fit the model's context is refused before a backend
 // or a card is touched), the wait for a slot or a swap, a comment on a stream
-// that says nothing, and one ledger row in counts, never content.
+// that says nothing, a client that goes away stopping its call upstream, and
+// one ledger row in counts, never content.
 //
 // One more change, for the ledger alone: a streamed OpenAI request that did not
 // set `stream_options` is sent with `include_usage`, and the usage-only event
@@ -35,7 +38,7 @@ import type { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerR
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { Principal } from "./auth.js";
-import { json, KEEP_ALIVE_MS, keepAlive } from "./doors.js";
+import { answerFor, estimateTokens, goneWith, json, KEEP_ALIVE_MS, keepAlive } from "./doors.js";
 import type { Ledger, Row } from "./ledger.js";
 import {
   DOORS,
@@ -46,14 +49,6 @@ import {
   type ServedModel,
 } from "./served.js";
 import { splitsOn, splitWhole, streamSplit } from "./split-doors.js";
-
-/**
- * The bytes of text one token stands for at most, in the guard's estimate. A
- * real tokenizer gives three to five bytes of prose or code a token, so this
- * estimate is below the true count: the guard refuses what surely cannot fit,
- * and the backend's own check answers for what is close.
- */
-export const BYTES_PER_TOKEN = 6;
 
 /** How long a whole (not streamed) answer waits without headers before Kvasir sends its own. */
 export const WHOLE_HEADERS_AFTER_MS = 30_000;
@@ -123,18 +118,16 @@ export function estimateInput(body: Record<string, unknown>, protocol: Protocol)
         : protocol === "messages"
           ? ["system", "messages", "tools"]
           : ["instructions", "input", "tools"];
-  let bytes = 0;
-  const walk = (v: unknown, key: string | null): void => {
-    if (typeof v === "string") {
-      // an image travels as base64 in `data` or as a data URL; it is not text
-      if (key === "data" || v.startsWith("data:")) return;
-      bytes += Buffer.byteLength(v, "utf8");
-    } else if (Array.isArray(v)) for (const x of v) walk(x, key);
-    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, k);
-  };
-  for (const f of fields) walk(body[f], f);
-  return Math.floor(bytes / BYTES_PER_TOKEN);
+  return estimateTokens(Object.fromEntries(fields.map((f) => [f, body[f]])));
 }
+
+/** Where each door keeps the longest answer a request asks for; the first is where Kvasir writes one. */
+const ANSWER_FIELDS: Record<Protocol, string[]> = {
+  "chat-completions": ["max_tokens", "max_completion_tokens"],
+  completions: ["max_tokens"],
+  messages: ["max_tokens"],
+  responses: ["max_output_tokens"],
+};
 
 /** The counts an answer carries, read as it passes: usage, whether it was cut at the longest answer, when it began. */
 class Meter {
@@ -146,6 +139,8 @@ class Meter {
   capped = false;
   failed = false;
   firstAt: number | null = null;
+  /** The deltas streamed: the tokens given so far, where a stream ends before its usage comes. */
+  deltas = 0;
   constructor(
     private readonly protocol: Protocol,
     /** The usage-only event Kvasir asked for, taken out again. */
@@ -203,8 +198,10 @@ class Meter {
       const c = choices?.[0];
       if (c?.finish_reason === "length") this.capped = true;
       const d = (c?.delta ?? {}) as Record<string, unknown>;
-      if (this.firstAt === null && (d.content || d.reasoning_content || d.tool_calls || c?.text))
-        this.firstAt = Date.now();
+      if (d.content || d.reasoning_content || d.tool_calls || c?.text) {
+        this.deltas += 1;
+        if (this.firstAt === null) this.firstAt = Date.now();
+      }
       if (this.strip && choices && choices.length === 0 && e.usage) return false;
     } else if (this.protocol === "messages") {
       const type = String(e.type ?? "");
@@ -215,11 +212,17 @@ class Meter {
         if ((e.delta as { stop_reason?: unknown } | undefined)?.stop_reason === "max_tokens")
           this.capped = true;
       }
-      if (type === "content_block_delta" && this.firstAt === null) this.firstAt = Date.now();
+      if (type === "content_block_delta") {
+        this.deltas += 1;
+        if (this.firstAt === null) this.firstAt = Date.now();
+      }
       if (type === "error") this.failed = true;
     } else {
       const type = String(e.type ?? "");
-      if (type.endsWith(".delta") && this.firstAt === null) this.firstAt = Date.now();
+      if (type.endsWith(".delta")) {
+        this.deltas += 1;
+        if (this.firstAt === null) this.firstAt = Date.now();
+      }
       if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
         this.responses((e.response as { usage?: Record<string, unknown> } | undefined)?.usage);
         if (type === "response.incomplete") this.capped = true;
@@ -417,10 +420,18 @@ export async function passThrough(
   body.model = model.upstream;
   if (path === "/v1/messages" && !("thinking" in body) && model.anthropicThinking === "disabled")
     body.thinking = { type: "disabled" };
+  // the longest answer (C1): a request's own held to the model's, and the model's where it named none
+  const input = counting ? 0 : estimateInput(body, protocol);
+  if (!counting) {
+    const fields = ANSWER_FIELDS[protocol];
+    const named = fields.filter((f) => typeof body[f] === "number" && Number.isFinite(body[f]));
+    for (const f of named) body[f] = Math.min(Number(body[f]), model.maxOutputTokens);
+    if (named.length === 0 && model.maxOutputTokens > 0)
+      body[fields[0]] = answerFor(model.maxOutputTokens, model.contextLength, input);
+  }
   // the context guard, before any backend or card is touched
   if (!counting && model.contextLength) {
     const longest = Number(body.max_tokens ?? body.max_completion_tokens ?? body.max_output_tokens ?? 0) || 0;
-    const input = estimateInput(body, protocol);
     if (longest > model.contextLength || input + longest > model.contextLength)
       return refused(
         400,
@@ -439,10 +450,8 @@ export async function passThrough(
   if (strip) body.stream_options = { include_usage: true };
   const out = JSON.stringify(body);
 
-  const upstreamAbort = new AbortController();
-  res.on("close", () => {
-    if (!res.writableFinished) upstreamAbort.abort();
-  });
+  // a client that goes away stops its call upstream (C1)
+  const upstreamAbort = goneWith(res);
   // a stream that waits (a queue, a swap) gets its headers now and a comment each second, so no client
   // gives up on a response that says nothing; a whole answer gets its headers after a while and a newline
   // each keep-alive interval, which a JSON parser skips
@@ -492,7 +501,7 @@ export async function passThrough(
         : new LeaseRefused(503, "unavailable", e instanceof Error ? e.message : String(e));
     if (!counting)
       ledgerRow({
-        outcome: upstreamAbort.signal.aborted ? "aborted" : "refused",
+        outcome: upstreamAbort.signal.aborted ? "gone" : "refused",
         refusal: { layer: "health", fact: r.message },
         totalMs: Date.now() - started,
       });
@@ -638,12 +647,16 @@ export async function passThrough(
     if (!res.writableEnded) res.end();
   }
   if (outcome === "completed" && meter.capped) outcome = "capped";
+  // a client that went away before the answer was done: its call was stopped, and the tokens given until
+  // then are counted from the deltas where no usage came (C1)
+  const gone = outcome === "aborted";
+  if (gone) outcome = "gone";
   if (counting) return;
   const totalMs = Date.now() - started;
   ledgerRow({
     backend: lease.backend,
     input: meter.input,
-    output: meter.output,
+    output: gone ? meter.output || meter.deltas : meter.output,
     cacheRead: meter.cacheRead,
     cacheWrite: meter.cacheWrite,
     reasoning: meter.reasoning,
@@ -653,3 +666,5 @@ export async function passThrough(
     outcome,
   });
 }
+
+export { BYTES_PER_TOKEN } from "./doors.js";

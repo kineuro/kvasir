@@ -79,6 +79,8 @@ node dist/main.js models add --server https://models.example.org/v1 --key-file s
 
 `--thinking on` asks every model of the server that reasons to think before it answers, and `--thinking off` turns it off, through the chat template's `enable_thinking`; without either the server's own default decides. Thinking is the backend's, for all of its models. `--max-tokens N` is the longest answer each model named is held with, never more than the server allows. Naming a model of a server Kvasir holds already with either changes them in place, without asking the models again.
 
+Every door holds a call to its model's longest answer: a call that names none is given it, less where a long prompt leaves less room in the context, and a call that names more is held to it, so no call runs until the context is full. `maxTokens` in kvasir.json holds a backend's models lower, by the backend's id, and the catalog keeps what it says: `"maxTokens": { "models-example-org": 16384 }` keeps that server's 27B at 16,384 tokens where its server allows 65,536. A client that goes away before its answer is done stops its call on the backend, and its ledger row says `gone`, with the tokens the model gave until then.
+
 ## License
 
 AGPL-3.0-only, under the same [contributor license agreement](CLA.md) as the engine. See [CONTRIBUTING.md](CONTRIBUTING.md).

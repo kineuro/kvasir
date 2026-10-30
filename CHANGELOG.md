@@ -4,6 +4,19 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- A backend's longest answer in kvasir.json: `maxTokens` holds the models of each backend it names, by the backend's id, to that many tokens (`"maxTokens": { "models-example-org": 16384 }`), so a site keeps a model whose server allows 65,536 tokens to fewer without changing the catalog. The held entries keep what they say; `GET /v1/models`, `GET /v1/config`, a grant's limits and the doors use the lower number.
+
+### Changed
+
+- Every door holds a call to its model's longest answer (C1). A call that names none is sent on with the model's longest answer (`max_tokens`, or `max_output_tokens` on OpenAI's responses), less where a long prompt leaves less room in the context, reckoned on twice the low estimate of its input; a call that names more is held to it. An answer cut there says so as the server said it: `length` on OpenAI's doors and on pi-messages, `max_tokens` on Anthropic's. Until now Kvasir sent a longest answer only where the client named one, and a call without one ran until the model's context was full. A pass-through request that asks for more than the model's longest answer is now held to it and sent on, rather than refused by the context guard where it could not fit.
+- The ledger says `gone` for a call whose client went away before its answer was done, with the tokens the model gave until then: the usage the backend sent, or where it sent none yet, the deltas streamed, one token each.
+
+### Fixed
+
+- A client that goes away stops its call on the backend, on pi-messages and on the chat door through pi-ai as the pass-through doors already did. Those two doors waited for the request's `close`, which Node emits once the body is read, not when the client leaves, so a model went on generating for a client that had gone, holding the device for minutes. Each door now aborts the call upstream when its response closes before it is done, and a call still waiting for a slot leaves the queue.
+
 ## [1.0.0-alpha.10] - 2026-10-14
 
 ### Added

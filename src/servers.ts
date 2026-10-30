@@ -225,7 +225,9 @@ export function answerOf(v: unknown): number | null {
 /**
  * The longest answer a model is held with: the one asked for, never more than its server allows or its
  * context holds; where none was asked for, the server's own, and where the server says none either,
- * 4,096 tokens, or 16,384 for a model that reasons on a backend that asks it to think.
+ * 4,096 tokens, or 16,384 for a model that reasons on a backend that asks it to think. It is what the
+ * catalog holds; where the model is served, kvasir.json's `maxTokens` for its backend holds it lower
+ * (`Backend.longest`), and every door holds a call to that (C1).
  */
 export function longestAnswer(o: Offered, s: Partial<ServerSettings> = {}): number {
   const context = o.context_length ?? 32_768;

@@ -11,6 +11,7 @@ import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-re
 import { stream as openaiStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { Admission } from "./admission.js";
 import type { BackendConfig, ModelEntry } from "./config.js";
+import { answerFor } from "./doors.js";
 import { splitInline } from "./inline.js";
 
 export interface Health {
@@ -45,9 +46,12 @@ export class Backend {
   private stopped = false;
   private readonly quiet = new AbortController();
   private wake: (() => void) | null = null;
+  /** The longest answer kvasir.json holds this backend's models to (`maxTokens`), or none. */
+  readonly ceiling: number | null;
 
-  constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000) {
+  constructor(config: BackendConfig, queue = 8, waitCapMs = 60_000, ceiling: number | null = null) {
     this.config = config;
+    this.ceiling = ceiling;
     // the warm-up rule (§8.5) is a local runtime's; a remote provider is not warmed by us, and a backend
     // nobody asks to warm is not warming: it would hold the desk on its warming page for ever (#8)
     const warming = config.locality === "local" && config.warmup !== false;
@@ -83,6 +87,25 @@ export class Backend {
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
+  /**
+   * The longest answer an entry gives on this backend: the catalog's, held to kvasir.json's `maxTokens`
+   * for the backend where it names one. The entry is not changed, so the catalog keeps what it says.
+   */
+  longest(entry: ModelEntry): number {
+    return this.ceiling === null ? entry.maxTokens : Math.min(entry.maxTokens, this.ceiling);
+  }
+
+  /**
+   * The longest answer one call is held to (C1): what it asked for, never more than the entry's longest;
+   * where it asked for none, the default of `answerFor`, from `input`, a low estimate of the prompt's tokens.
+   */
+  answerFor(entry: ModelEntry, asked: unknown, input = 0): number {
+    const longest = this.longest(entry);
+    if (typeof asked === "number" && Number.isFinite(asked) && asked >= 1)
+      return Math.min(Math.floor(asked), longest);
+    return answerFor(longest, entry.contextWindow, input);
+  }
+
   /** The pi model of one entry, as the backend serves it. */
   model(entry: ModelEntry): Model<"openai-completions" | "anthropic-messages" | "openai-codex-responses"> {
     const native = this.native?.(entry);
@@ -99,7 +122,7 @@ export class Backend {
       input: entry.input,
       cost: entry.cost,
       contextWindow: entry.contextWindow,
-      maxTokens: entry.maxTokens,
+      maxTokens: this.longest(entry),
     } as Model<"openai-completions" | "anthropic-messages" | "openai-codex-responses">;
   }
 
@@ -214,7 +237,13 @@ export class Backends {
   readonly gate: boolean;
   private readonly queue: number;
   private readonly waitCapMs: number;
-  constructor(admission?: { queue: number; waitCapSeconds: number; gate?: boolean }) {
+  /** kvasir.json's `maxTokens`: the longest answer of each backend named, by its id. */
+  private readonly ceilings: Record<string, number>;
+  constructor(
+    admission?: { queue: number; waitCapSeconds: number; gate?: boolean },
+    ceilings: Record<string, number> = {},
+  ) {
+    this.ceilings = ceilings;
     this.queue = admission?.queue ?? 8;
     this.waitCapMs = (admission?.waitCapSeconds ?? 60) * 1000;
     this.gate = admission?.gate ?? true;
@@ -222,7 +251,12 @@ export class Backends {
 
   /** A backend for a configuration, with the queue and the wait cap every backend here has. */
   make(config: BackendConfig): Backend {
-    return new Backend(config, this.queue, this.waitCapMs);
+    return new Backend(
+      config,
+      this.queue,
+      this.waitCapMs,
+      Object.hasOwn(this.ceilings, config.id) ? this.ceilings[config.id] : null,
+    );
   }
 
   /** A backend served: one an admin added goes before Kvasir's own, so the order an admin added them in stays first. */
@@ -296,7 +330,7 @@ export class Backends {
             input: m.input,
             cost: m.cost,
             contextWindow: m.contextWindow,
-            maxTokens: m.maxTokens,
+            maxTokens: b.longest(m),
             backend: b.config.id,
             locality: b.config.locality,
             admitted: b.config.locality === "remote" ? null : b.admitted.has(m.id),

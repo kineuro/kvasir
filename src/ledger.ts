@@ -19,7 +19,11 @@ export interface Row {
   money: number;
   ttftMs: number | null;
   totalMs: number | null;
-  outcome: "completed" | "refused" | "error" | "aborted" | "capped";
+  /**
+   * How the call ended: `capped` at its longest answer, `gone` where the client went away before the answer
+   * was done, so the call upstream was stopped and the counts are what it gave until then (C1).
+   */
+  outcome: "completed" | "refused" | "error" | "aborted" | "capped" | "gone";
   refusal?: { layer: string; fact: string };
   /** The client key the stream was spent under (record 47), where a client key called. */
   clientKey?: string | null;

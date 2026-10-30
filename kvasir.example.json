@@ -66,5 +66,6 @@
   },
   "clients": {
     "ledgerDays": 90
-  }
+  },
+  "maxTokens": {}
 }

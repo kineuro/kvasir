@@ -326,7 +326,7 @@ export function servedOf(backend: Backend, entry: ModelEntry, source?: StatusSou
     default: onCard?.default ?? remote?.default ?? false,
     status,
     contextLength: entry.contextWindow,
-    maxOutputTokens: entry.maxTokens,
+    maxOutputTokens: backend.longest(entry),
     concurrency: spec.concurrency ?? backend.config.concurrency,
     reasoning: entry.reasoning,
     tools: entry.spec ? spec.tools : true,
