@@ -4,6 +4,8 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.0.0-alpha.11] - 2026-10-31
+
 ### Added
 
 - A backend's longest answer in kvasir.json: `maxTokens` holds the models of each backend it names, by the backend's id, to that many tokens (`"maxTokens": { "models-example-org": 16384 }`), so a site keeps a model whose server allows 65,536 tokens to fewer without changing the catalog. The held entries keep what they say; `GET /v1/models`, `GET /v1/config`, a grant's limits and the doors use the lower number.
