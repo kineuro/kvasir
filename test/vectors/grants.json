@@ -16,7 +16,7 @@
       "detail": "sensitive"
     },
     "admin": {
-      "grants": ["assistant-settings:see", "assistant-settings:work", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+      "grants": ["assistant-settings:see", "assistant-settings:work", "audit:see", "data:see", "data:work", "database:see", "database:work", "handover-password:see", "handover-password:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
       "detail": "sensitive"
     },
     "assist": {
@@ -25,7 +25,7 @@
     }
   },
   "everything": {
-    "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+    "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "handover-password:see", "handover-password:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
     "detail": "sensitive"
   },
   "groups_claim": "groups",
@@ -90,7 +90,7 @@
   "ceilings": [
     {
       "name": "a reader ceiling keeps a reader's grants and the assistant, and lowers detail",
-      "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
+      "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "handover-password:see", "handover-password:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"],
       "detail": "sensitive",
       "ceiling": "reader",
       "expect": { "grants": ["assistant:use", "data:see", "query:see", "query:work"], "detail": "plain" }
@@ -138,12 +138,12 @@
     {
       "name": "admin is every grant but the assistant",
       "roles": "admin",
-      "expect": { "grants": ["assistant-settings:see", "assistant-settings:work", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"], "detail": "sensitive" }
+      "expect": { "grants": ["assistant-settings:see", "assistant-settings:work", "audit:see", "data:see", "data:work", "database:see", "database:work", "handover-password:see", "handover-password:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"], "detail": "sensitive" }
     },
     {
       "name": "admin with assist is everything",
       "roles": "admin,assist",
-      "expect": { "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"], "detail": "sensitive" }
+      "expect": { "grants": ["assistant-settings:see", "assistant-settings:work", "assistant:use", "audit:see", "data:see", "data:work", "database:see", "database:work", "handover-password:see", "handover-password:work", "identity:see", "identity:work", "install:see", "install:work", "kvasir:see", "kvasir:work", "pipelines:see", "pipelines:work", "places:see", "places:work", "query:see", "query:work", "release:see", "release:work", "review:see", "review:work"], "detail": "sensitive" }
     },
     {
       "name": "an empty role list is refused",

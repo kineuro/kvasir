@@ -4,6 +4,10 @@ All notable changes to Kvasir are recorded here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- The grants `handover-password:see` and `handover-password:work` (suite contract version 3), held by the admin set and by everything, as the contract's vectors say.
+
 ## [1.0.0-alpha.11] - 2026-10-31
 
 ### Added
